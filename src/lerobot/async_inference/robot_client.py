@@ -68,6 +68,7 @@ from lerobot.robots import (  # noqa: F401
     koch_follower,
     make_robot_from_config,
     omx_follower,
+    piper,
     so_follower,
     unitree_g1,
 )
