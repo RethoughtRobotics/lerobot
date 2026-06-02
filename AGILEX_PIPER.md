@@ -77,6 +77,10 @@ Use this when inference runs on a separate GPU server.
 ### 4.1 On the GPU server
 
 ```bash
+uv pip install 'lerobot[async]
+```
+
+```bash
 python -m lerobot.async_inference.policy_server \
     --host=0.0.0.0 \
     --port=8080 \
