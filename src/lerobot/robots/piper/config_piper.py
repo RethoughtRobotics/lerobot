@@ -16,19 +16,19 @@ class PiperRobotConfig(RobotConfig):
     cameras: dict[str, CameraConfig] = field(
         default_factory=lambda: {
             "left_gripper": RealSenseCameraConfig(
-                serial_number_or_name="<LEFT_GRIPPER_SERIAL>",
+                serial_number_or_name="233622071845",
                 width=640,
                 height=480,
                 fps=30,
             ),
             "right_gripper": RealSenseCameraConfig(
-                serial_number_or_name="<RIGHT_GRIPPER_SERIAL>",
+                serial_number_or_name="233622073222",
                 width=640,
                 height=480,
                 fps=30,
             ),
             "head": RealSenseCameraConfig(
-                serial_number_or_name="<HEAD_SERIAL>",
+                serial_number_or_name="938422072905",
                 width=640,
                 height=480,
                 fps=30,
