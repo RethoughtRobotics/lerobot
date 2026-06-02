@@ -12,10 +12,10 @@ from .config_piper import PiperRobotConfig
 
 # SDK returns/expects joint angles in 0.001 deg units; dataset is in degrees.
 JOINT_FACTOR = 1000  # 0.001 deg <-> deg
-# SDK gripper raw range ~0-10000; dataset range 0-100.
+# SDK raw range ~0-10000; dataset range 0-100. Factor = 100.
 GRIPPER_FACTOR = 100
 HOME_POSITION = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # 6 joints (deg) + gripper (mm)
-MOTOR_NAMES = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "gripper"]
+MOTOR_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"]
 
 
 class _PiperArm:
@@ -52,12 +52,12 @@ class _PiperArm:
         j = self.sdk.GetArmJointMsgs().joint_state
         g = self.sdk.GetArmGripperMsgs().gripper_state
         return {
-            "joint_1": j.joint_1 / JOINT_FACTOR,
-            "joint_2": j.joint_2 / JOINT_FACTOR,
-            "joint_3": j.joint_3 / JOINT_FACTOR,
-            "joint_4": j.joint_4 / JOINT_FACTOR,
-            "joint_5": j.joint_5 / JOINT_FACTOR,
-            "joint_6": j.joint_6 / JOINT_FACTOR,
+            "joint1": j.joint_1 / JOINT_FACTOR,
+            "joint2": j.joint_2 / JOINT_FACTOR,
+            "joint3": j.joint_3 / JOINT_FACTOR,
+            "joint4": j.joint_4 / JOINT_FACTOR,
+            "joint5": j.joint_5 / JOINT_FACTOR,
+            "joint6": j.joint_6 / JOINT_FACTOR,
             "gripper": g.grippers_angle / GRIPPER_FACTOR,
         }
 
