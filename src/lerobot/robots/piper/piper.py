@@ -37,6 +37,8 @@ class _PiperArm:
                 for i in range(1, 7)
             ]
             if all(statuses):
+                # Set joint control mode once after enabling
+                self.sdk.MotionCtrl_2(0x01, 0x01, 100, 0x00)
                 return True
             time.sleep(0.5)
         return False
@@ -62,7 +64,6 @@ class _PiperArm:
         }
 
     def write(self, joints: list[float]):
-        self.sdk.MotionCtrl_2(0x01, 0x01, 100, 0x00)
         self.sdk.JointCtrl(
             round(joints[0] * JOINT_FACTOR),
             round(joints[1] * JOINT_FACTOR),
