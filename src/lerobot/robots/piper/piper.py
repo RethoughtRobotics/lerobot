@@ -62,15 +62,20 @@ class _PiperArm:
         }
 
     def write(self, joints: list[float]):
-        self.sdk.MotionCtrl_2(0x01, 0x01, 100, 0x00)
-        self.sdk.JointCtrl(
-            round(joints[0] * JOINT_FACTOR),
-            round(joints[1] * JOINT_FACTOR),
-            round(joints[2] * JOINT_FACTOR),
-            round(joints[3] * JOINT_FACTOR),
-            round(joints[4] * JOINT_FACTOR),
-            round(joints[5] * JOINT_FACTOR),
+        current = self.read()
+        raw_cmd = [round(joints[i] * JOINT_FACTOR) for i in range(6)]
+        raw_cur = [round(current[f"joint{i+1}"] * JOINT_FACTOR) for i in range(6)]
+        delta = [raw_cmd[i] - raw_cur[i] for i in range(6)]
+        print(
+            f"\n[PIPER WRITE {'LEFT' if hasattr(self, '_side') and self._side == 'left' else ''}]"
+            f"\n  current (0.001deg): {raw_cur}"
+            f"\n  command (0.001deg): {raw_cmd}"
+            f"\n  delta   (0.001deg): {delta}"
+            f"\n  gripper current: {round(current['gripper'] * GRIPPER_FACTOR)}  command: {round(joints[6] * GRIPPER_FACTOR)}",
+            flush=True,
         )
+        self.sdk.MotionCtrl_2(0x01, 0x01, 100, 0x00)
+        self.sdk.JointCtrl(*raw_cmd)
         self.sdk.GripperCtrl(abs(round(joints[6] * GRIPPER_FACTOR)), 1000, 0x01, 0)
 
 
