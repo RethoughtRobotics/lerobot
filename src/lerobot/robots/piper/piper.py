@@ -10,8 +10,11 @@ from lerobot.utils.decorators import check_if_already_connected, check_if_not_co
 from ..robot import Robot
 from .config_piper import PiperRobotConfig
 
-JOINT_FACTOR = 57324.840764  # rad -> 0.001 deg
-HOME_POSITION = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # 6 joints + gripper in rad
+# SDK returns/expects joint angles in 0.001 deg units; dataset is in degrees.
+JOINT_FACTOR = 1000  # 0.001 deg <-> deg
+# SDK returns/expects gripper in 0.001 mm units; dataset is in mm.
+GRIPPER_FACTOR = 1000  # 0.001 mm <-> mm
+HOME_POSITION = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # 6 joints (deg) + gripper (mm)
 MOTOR_NAMES = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "gripper"]
 
 
@@ -55,7 +58,7 @@ class _PiperArm:
             "joint_4": j.joint_4 / JOINT_FACTOR,
             "joint_5": j.joint_5 / JOINT_FACTOR,
             "joint_6": j.joint_6 / JOINT_FACTOR,
-            "gripper": g.grippers_angle / 1e6,
+            "gripper": g.grippers_angle / GRIPPER_FACTOR,
         }
 
     def write(self, joints: list[float]):
@@ -68,7 +71,7 @@ class _PiperArm:
             round(joints[4] * JOINT_FACTOR),
             round(joints[5] * JOINT_FACTOR),
         )
-        self.sdk.GripperCtrl(abs(round(joints[6] * 1e6)), 1000, 0x01, 0)
+        self.sdk.GripperCtrl(abs(round(joints[6] * GRIPPER_FACTOR)), 1000, 0x01, 0)
 
 
 class PiperRobot(Robot):
