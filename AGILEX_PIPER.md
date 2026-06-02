@@ -88,8 +88,21 @@ python -m lerobot.async_inference.policy_server \
 ```
 
 ### 4.2 On the robot PC
+Load weights from HuggingFace Hub:
 
-Make sure the checkpoint is accessible (copy it over or use a shared mount).
+```bash
+  python src/lerobot/async_inference/robot_client.py \
+      --robot.type=piper \
+      --task="test tube insertion" \
+      --server_address=<SERVER_IP>:8080 \
+      --policy_type=molmoact2 \
+      --pretrained_name_or_path=andnetdeboer/molmoact2-agilex-test_tube \
+      --policy_device=cuda \
+      --client_device=cpu \
+      --actions_per_chunk=50
+```
+
+Load weights locally
 
 ```bash
 python src/lerobot/async_inference/robot_client.py \
