@@ -416,6 +416,10 @@ class MolmoAct2Config(PreTrainedConfig):
                 f"Unsupported inference_action_mode={self.inference_action_mode!r}. "
                 "Expected one of {None, 'continuous', 'discrete'}."
             )
+        # Auto-set inference_action_mode from action_mode when unambiguous so saved
+        # checkpoints always have it populated and never require manual intervention.
+        if self.inference_action_mode is None and self.action_mode in {"continuous", "discrete"}:
+            self.inference_action_mode = self.action_mode
         if self.inference_action_mode == "continuous" and self.action_mode == "discrete":
             raise ValueError("MolmoAct2 action_mode='discrete' cannot run continuous inference.")
         if self.inference_action_mode == "discrete" and self.action_mode == "continuous":
