@@ -12,8 +12,8 @@ from .config_piper import PiperRobotConfig
 
 # SDK returns/expects joint angles in 0.001 deg units; dataset is in degrees.
 JOINT_FACTOR = 1000  # 0.001 deg <-> deg
-# SDK returns/expects gripper in 0.001 mm units; dataset is in mm.
-GRIPPER_FACTOR = 1000  # 0.001 mm <-> mm
+# SDK gripper raw range ~0-10000; dataset range 0-100.
+GRIPPER_FACTOR = 100
 HOME_POSITION = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # 6 joints (deg) + gripper (mm)
 MOTOR_NAMES = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "gripper"]
 
