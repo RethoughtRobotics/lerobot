@@ -10,8 +10,8 @@ from ..config import RobotConfig
 @dataclass
 class PiperRobotConfig(RobotConfig):
     # CAN interface names for left and right arms
-    left_can: str = "can1"
-    right_can: str = "can0"
+    left_can: str = "can0"
+    right_can: str = "can1"
 
     cameras: dict[str, CameraConfig] = field(
         default_factory=lambda: {

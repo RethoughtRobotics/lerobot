@@ -68,6 +68,9 @@ class _PiperArm:
         }
 
     def write(self, joints: list[float]):
+        # Callers may pass torch scalar tensors (e.g. replaying a dataset); coerce to float.
+        joints = [float(j) for j in joints]
+        self.sdk.MotionCtrl_2(0x01, 0x01, 100, 0x00)
         self.sdk.JointCtrl(
             round(joints[0] * JOINT_FACTOR),
             round(joints[1] * JOINT_FACTOR),

@@ -386,9 +386,13 @@ class RobotClient:
             timed_action = self.action_queue.get_nowait()
         get_end = time.perf_counter() - get_start
 
-        _performed_action = self.robot.send_action(
-            self._action_tensor_to_action_dict(timed_action.get_action())
-        )
+        action_dict = self._action_tensor_to_action_dict(timed_action.get_action())
+
+        # Always log the qpos the robot is being commanded to execute
+        qpos_str = " | ".join(f"{k}={v:.3f}" for k, v in action_dict.items())
+        self.logger.info(f"Action #{timed_action.get_timestep()} qpos: {qpos_str}")
+
+        _performed_action = self.robot.send_action(action_dict)
         with self.latest_action_lock:
             self.latest_action = timed_action.get_timestep()
 
