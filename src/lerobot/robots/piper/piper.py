@@ -16,6 +16,10 @@ JOINT_FACTOR = 1000  # 0.001 deg <-> deg
 GRIPPER_FACTOR = 100
 HOME_POSITION = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # 6 joints (deg) + gripper (mm)
 MOTOR_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"]
+# Average frame-0 joint state across 51 recorded demos (degrees / gripper 0-100)
+READY_POSITION_LEFT  = [6.885, -94.710, 99.322, 15.872, 19.413,  2.262, 75.980]
+READY_POSITION_RIGHT = [-6.336, -93.954, 97.982, 16.078, -7.550, -19.384, 70.629]
+READY_MOVE_TIME = 5.0  # seconds to wait for arms to reach ready position
 
 
 class _PiperArm:
@@ -135,8 +139,9 @@ class PiperRobot(Robot):
             self.calibrate()
 
     def calibrate(self) -> None:
-        self._left.home()
-        self._right.home()
+        self._left.write(READY_POSITION_LEFT)
+        self._right.write(READY_POSITION_RIGHT)
+        time.sleep(READY_MOVE_TIME)
 
     def configure(self) -> None:
         pass

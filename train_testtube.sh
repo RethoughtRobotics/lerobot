@@ -1,0 +1,41 @@
+#!/bin/bash
+accelerate launch \
+  --num_processes=1 \
+  --mixed_precision=bf16 \
+  -m lerobot.scripts.lerobot_train \
+  --dataset.repo_id=CaptainRapid/TestTubeInsertion \
+  --dataset.root=$HOME/.cache/huggingface/lerobot/CaptainRapid/TestTubeInsertion \
+  --dataset.video_backend=pyav \
+  --dataset.image_transforms.enable=true \
+  --policy.type=molmoact2 \
+  --policy.checkpoint_path=allenai/MolmoAct2-BimanualYAM \
+  --policy.device=cuda \
+  --policy.action_mode=continuous \
+  --policy.train_action_expert_only=true \
+  --policy.chunk_size=10 \
+  --policy.n_action_steps=10 \
+  --policy.setup_type="bimanual yam robotic arms in molmoact2" \
+  --policy.control_mode="absolute joint pose" \
+  --policy.image_keys='["observation.images.head","observation.images.left_gripper","observation.images.right_gripper"]' \
+  --policy.model_dtype=bfloat16 \
+  --policy.num_flow_timesteps=8 \
+  --policy.gradient_checkpointing=true \
+  --policy.freeze_embedding=true \
+  --policy.normalize_gripper=true \
+  --policy.enable_knowledge_insulation=false \
+  --policy.normalize_language=true \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
+  --policy.push_to_hub=true \
+  --policy.repo_id=andnetdeboer/molmoact2-agilex-test_tube \
+  --wandb.enable=true \
+  --wandb.project=molmoact2-agilex \
+  --wandb.entity=deboerandnet-northwestern-university \
+  --output_dir=outputs/testtube_run1 \
+  --steps=30000 \
+  --batch_size=8 \
+  --num_workers=4 \
+  --log_freq=100 \
+  --save_checkpoint=true \
+  --save_freq=6000 \
+  --config_path=outputs/testtube_run1/checkpoints/006000/pretrained_model/train_config.json \
+  --resume=true

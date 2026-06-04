@@ -143,16 +143,28 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             f"Device: {policy_specs.device}"
         )
 
+        already_loaded = (
+            self.policy is not None
+            and self.policy_type == policy_specs.policy_type
+            and self.device == policy_specs.device
+            and getattr(self, "_loaded_pretrained_path", None) == policy_specs.pretrained_name_or_path
+        )
+
         self.device = policy_specs.device
         self.policy_type = policy_specs.policy_type  # act, pi0, etc.
         self.lerobot_features = policy_specs.lerobot_features
         self.actions_per_chunk = policy_specs.actions_per_chunk
+
+        if already_loaded:
+            self.logger.info(f"Policy already loaded from {policy_specs.pretrained_name_or_path}, skipping reload")
+            return services_pb2.Empty()
 
         policy_class = get_policy_class(self.policy_type)
 
         start = time.perf_counter()
         self.policy = policy_class.from_pretrained(policy_specs.pretrained_name_or_path)
         self.policy.to(self.device)
+        self._loaded_pretrained_path = policy_specs.pretrained_name_or_path
 
         # Load preprocessor and postprocessor, overriding device to match requested device
         device_override = {"device": self.device}
