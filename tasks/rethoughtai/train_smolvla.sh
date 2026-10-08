@@ -1,12 +1,12 @@
 #!/bin/bash
 # SmolVLA fine-tuning script for andnetdeboer/rethoughtai dataset collection.
-# Usage: bash train_smolvla.sh [DATASET_REPO_ID] [RUN_NAME]
+# Usage: bash tasks/rethoughtai/train_smolvla.sh [DATASET_REPO_ID] [RUN_NAME]
 #   DATASET_REPO_ID: HuggingFace dataset repo (default: andnetdeboer/rethoughtai)
 #   RUN_NAME:        output subdirectory name (default: smolvla_run1)
 #
 # Initialises from the official lerobot/smolvla_base checkpoint.
 # Before running:
-#   source .venv/bin/activate   (or: uv run bash train_smolvla.sh ...)
+#   source .venv/bin/activate   (or: uv run bash tasks/rethoughtai/train_smolvla.sh ...)
 #   export HF_TOKEN=hf_...      (if dataset or base model is private)
 
 DATASET_REPO_ID="${1:-andnetdeboer/rethoughtai}"

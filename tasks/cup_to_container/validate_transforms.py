@@ -14,7 +14,6 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from lerobot.datasets import LeRobotDataset
 

@@ -25,9 +25,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-# Add src to path (works when run from lerobot root dir)
+# Local task modules (transforms, wrapped_dataset, compute_stats)
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from lerobot.datasets import LeRobotDataset
@@ -320,7 +319,7 @@ def train(args):
 def parse_args():
     p = argparse.ArgumentParser(description="Train ACT or SmolVLA on CupToContainer")
     p.add_argument("--policy_type", choices=["act", "smolvla"], required=True)
-    p.add_argument("--dataset_repo_id", default="andnetdeboer/BlueCupToContainer")
+    p.add_argument("--dataset_repo_id", required=True, help="e.g. andnetdeboer/BlueCupToContainer")
     p.add_argument("--dataset_dir", default=None,
                    help="Local dataset root; defaults to the HF cache (downloads if missing)")
     p.add_argument("--video_backend", choices=["torchcodec", "pyav"], default="torchcodec")

@@ -1,11 +1,11 @@
 #!/bin/bash
 # ACT training script for andnetdeboer/rethoughtai dataset collection.
-# Usage: bash train_act.sh [DATASET_REPO_ID] [RUN_NAME]
+# Usage: bash tasks/rethoughtai/train_act.sh [DATASET_REPO_ID] [RUN_NAME]
 #   DATASET_REPO_ID: HuggingFace dataset repo (default: andnetdeboer/rethoughtai)
 #   RUN_NAME:        output subdirectory name (default: act_run1)
 #
 # Before running:
-#   source .venv/bin/activate   (or: uv run bash train_act.sh ...)
+#   source .venv/bin/activate   (or: uv run bash tasks/rethoughtai/train_act.sh ...)
 #   export HF_TOKEN=hf_...      (if dataset is private)
 
 DATASET_REPO_ID="${1:-andnetdeboer/rethoughtai}"

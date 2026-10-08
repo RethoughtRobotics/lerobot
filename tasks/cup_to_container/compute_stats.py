@@ -17,9 +17,6 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-# Add src to path for lerobot import
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from lerobot.datasets import LeRobotDataset
 
@@ -135,7 +132,7 @@ def compute_stats(repo_id: str, dataset_dir: Path | None, output_path: Path,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset_repo_id", default="andnetdeboer/BlueCupToContainer")
+    parser.add_argument("--dataset_repo_id", required=True)
     parser.add_argument("--dataset_dir", type=Path, default=None)
     parser.add_argument("--output_path", type=Path, required=True)
     args = parser.parse_args()
