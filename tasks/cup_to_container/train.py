@@ -56,13 +56,16 @@ def _json_stats_to_tensors(stats: dict, device: torch.device) -> dict:
     return out
 
 
-def build_policy_config(policy_type: str) -> ACTConfig | SmolVLAConfig:
+DEFAULT_CHUNK_SIZE = {"act": 100, "smolvla": 50}
+
+
+def build_policy_config(policy_type: str, chunk_size: int) -> ACTConfig | SmolVLAConfig:
     if policy_type == "act":
         return ACTConfig(
             input_features=None,
             output_features=None,
             n_obs_steps=1,
-            chunk_size=100,
+            chunk_size=chunk_size,
             n_action_steps=1,           # runtime ensembles with coeff=0.01
             vision_backbone="resnet18",
             pretrained_backbone_weights="ResNet18_Weights.IMAGENET1K_V1",
@@ -85,8 +88,8 @@ def build_policy_config(policy_type: str) -> ACTConfig | SmolVLAConfig:
             input_features=None,
             output_features=None,
             n_obs_steps=1,
-            chunk_size=50,
-            n_action_steps=50,
+            chunk_size=chunk_size,
+            n_action_steps=chunk_size,
             vlm_model_name="HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
             load_vlm_weights=True,
             freeze_vision_encoder=True,
@@ -108,13 +111,14 @@ def build_policy_config(policy_type: str) -> ACTConfig | SmolVLAConfig:
         raise ValueError(f"Unknown policy_type: {policy_type}")
 
 
-def load_or_compute_stats(stats_path: Path, repo_id: str, dataset_dir: Path | None, video_backend: str) -> dict:
+def load_or_compute_stats(stats_path: Path, repo_id: str, dataset_dir: Path | None, video_backend: str,
+                          chunk_size: int) -> dict:
     if stats_path.exists():
         logger.info(f"Loading cached stats from {stats_path}")
         with open(stats_path) as f:
             return json.load(f)
     logger.info("No cached stats found — computing from training split (this takes a few minutes)...")
-    return compute_stats(repo_id, dataset_dir, stats_path, video_backend)
+    return compute_stats(repo_id, dataset_dir, stats_path, video_backend, chunk_size)
 
 
 def build_optimizer(policy_type: str, policy: torch.nn.Module, steps: int):
@@ -168,12 +172,15 @@ def train(args):
 
     # ── stats ─────────────────────────────────────────────────────────────────
     dataset_dir = Path(args.dataset_dir) if args.dataset_dir else None
-    stats_path = Path(__file__).parent / f"stats_{args.dataset_repo_id.split('/')[-1]}.json"
-    stats_json = load_or_compute_stats(stats_path, args.dataset_repo_id, dataset_dir, args.video_backend)
+    chunk_size = args.chunk_size or DEFAULT_CHUNK_SIZE[args.policy_type]
+    # TCP-relative action stats depend on the horizon (later steps drift further from the
+    # current pose), so the cache is keyed by chunk size as well as dataset.
+    stats_path = Path(__file__).parent / f"stats_{args.dataset_repo_id.split('/')[-1]}_chunk{chunk_size}.json"
+    stats_json = load_or_compute_stats(stats_path, args.dataset_repo_id, dataset_dir, args.video_backend,
+                                       chunk_size)
     tensor_stats = _json_stats_to_tensors(stats_json, device)
 
     # ── dataset ───────────────────────────────────────────────────────────────
-    chunk_size = 100 if args.policy_type == "act" else 50
     logger.info(f"Loading {args.dataset_repo_id} (root={dataset_dir}) "
                 f"(training episodes: {TRAIN_EPISODES[:5]}...)")
     base_train = LeRobotDataset(
@@ -189,7 +196,7 @@ def train(args):
     logger.info(f"Training frames: {len(train_dataset)}")
 
     # ── policy ────────────────────────────────────────────────────────────────
-    policy_cfg = build_policy_config(args.policy_type)
+    policy_cfg = build_policy_config(args.policy_type, chunk_size)
     logger.info(f"Creating {args.policy_type} policy")
     policy = make_policy(cfg=policy_cfg, ds_meta=train_dataset.meta)
     policy = policy.to(device)
@@ -329,6 +336,8 @@ def parse_args():
                    help="Local dataset root; defaults to the HF cache (downloads if missing)")
     p.add_argument("--video_backend", choices=["torchcodec", "pyav"], default="torchcodec")
     p.add_argument("--compile", action="store_true", help="torch.compile the policy (ABC-style)")
+    p.add_argument("--chunk_size", type=int, default=None,
+                   help="Action chunk length in steps at 25 fps (default: act 100, smolvla 50)")
     p.add_argument("--output_dir", required=True)
     p.add_argument("--steps", type=int, default=100_000)
     p.add_argument("--batch_size", type=int, default=8)
