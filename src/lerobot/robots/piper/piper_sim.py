@@ -16,7 +16,7 @@ from functools import cached_property
 
 import numpy as np
 
-from lerobot.types import RobotAction, RobotObservation
+from lerobot.lerobot_types import RobotAction, RobotObservation
 
 from ..config import RobotConfig
 from ..robot import Robot

@@ -221,6 +221,10 @@ def decode_video_frames_pyav(
     # https://pyav.basswood-io.com/docs/stable/api/container.html#av.container.InputContainer.seek
     with av.open(video_path) as container:
         stream = container.streams.video[0]
+        # Decoders like dav1d (AV1) otherwise spin up a thread pool sized to every CPU core on
+        # each open, which costs ~200ms on many-core machines — far more than the few frames we
+        # decode per sample. Parallelism comes from DataLoader workers instead.
+        stream.codec_context.thread_count = 1
         # Seek to the nearest keyframe at or before `first_ts` with a 1 frame margin
         container.seek(
             round(first_ts / stream.time_base) - 1,

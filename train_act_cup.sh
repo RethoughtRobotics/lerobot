@@ -1,15 +1,15 @@
 #!/bin/bash
-# Launch ACT training on CupToContainer in a persistent tmux window.
-# Usage: bash train_act_cup.sh [DATASET_DIR] [RUN_NAME]
+# Launch ACT training on BlueCupToContainer in a persistent tmux window.
+# Usage: bash train_act_cup.sh [DATASET_REPO_ID] [RUN_NAME]
 #
-# Attach later:  tmux attach -t act-cup
-# Watch log:     tail -f outputs/act_cup_run1/train.log
+# Attach later:  tmux attach -t act-bluecup
+# Watch log:     tail -f outputs/act_bluecup_run1/train.log
 
 set -euo pipefail
 
-DATASET_DIR="${1:-${HOME}/.cache/huggingface/lerobot/andnetdeboer/CupToContainer}"
-RUN_NAME="${2:-act_cup_run1}"
-SESSION="act-cup"
+DATASET_REPO_ID="${1:-andnetdeboer/BlueCupToContainer}"
+RUN_NAME="${2:-act_bluecup_run1}"
+SESSION="act-bluecup"
 LEROBOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUTPUT_DIR="${LEROBOT_DIR}/outputs/${RUN_NAME}"
 LOG_FILE="${OUTPUT_DIR}/train.log"
@@ -28,14 +28,14 @@ tmux send-keys -t "${SESSION}" "echo 'ACT training starting — logging to ${LOG
 
 tmux send-keys -t "${SESSION}" "CUDA_VISIBLE_DEVICES=0 python cup_to_container/train.py \
   --policy_type act \
-  --dataset_dir '${DATASET_DIR}' \
+  --dataset_repo_id '${DATASET_REPO_ID}' \
   --output_dir '${OUTPUT_DIR}' \
   --steps 100000 \
   --batch_size 8 \
   --save_freq 10000 \
   --log_freq 100 \
-  --num_workers 4 \
-  --hub_repo_id 'andnetdeboer/act_CupToContainer' \
+  --num_workers 8 \
+  --hub_repo_id 'andnetdeboer/act_BlueCupToContainer' \
   --wandb_project 'rethoughtai-act' \
   --wandb_entity 'deboerandnet-northwestern-university' \
   2>&1 | tee '${LOG_FILE}'; echo '--- PROCESS EXITED ---'" Enter
