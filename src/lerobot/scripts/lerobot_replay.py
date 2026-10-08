@@ -136,6 +136,12 @@ def replay(cfg: ReplayConfig):
                 processed_action = robot_action_processor((action, {}))
                 _ = robot.send_action(processed_action)
 
+            if idx % 30 == 0:  # print every second
+                obs = robot.get_observation()
+                cmd_vals = [f"{processed_action[k]:.1f}" for k in list(processed_action)[:7]]
+                obs_vals = [f"{obs[k]:.1f}" for k in list(processed_action)[:7]]
+                logging.info(f"Frame {idx:4d} | CMD left: {cmd_vals} | ACT left: {obs_vals}")
+
             timer.wait()
     finally:
         timer.log_run_summary()

@@ -57,10 +57,11 @@ class _PiperArm:
     def read(self) -> dict[str, float]:
         j = self.sdk.GetArmJointMsgs().joint_state
         g = self.sdk.GetArmGripperMsgs().gripper_state
+        # SDK joint2 and joint3 are physically swapped vs dataset convention.
         return {
             "joint1": j.joint_1 / JOINT_FACTOR,
-            "joint2": j.joint_2 / JOINT_FACTOR,
-            "joint3": j.joint_3 / JOINT_FACTOR,
+            "joint2": j.joint_3 / JOINT_FACTOR,
+            "joint3": j.joint_2 / JOINT_FACTOR,
             "joint4": j.joint_4 / JOINT_FACTOR,
             "joint5": j.joint_5 / JOINT_FACTOR,
             "joint6": j.joint_6 / JOINT_FACTOR,
@@ -71,10 +72,11 @@ class _PiperArm:
         # Callers may pass torch scalar tensors (e.g. replaying a dataset); coerce to float.
         joints = [float(j) for j in joints]
         self.sdk.MotionCtrl_2(0x01, 0x01, 100, 0x00)
+        # SDK joint2 and joint3 are physically swapped vs dataset convention.
         self.sdk.JointCtrl(
             round(joints[0] * JOINT_FACTOR),
-            round(joints[1] * JOINT_FACTOR),
             round(joints[2] * JOINT_FACTOR),
+            round(joints[1] * JOINT_FACTOR),
             round(joints[3] * JOINT_FACTOR),
             round(joints[4] * JOINT_FACTOR),
             round(joints[5] * JOINT_FACTOR),
