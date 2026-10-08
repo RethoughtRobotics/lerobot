@@ -305,10 +305,15 @@ def train(args):
     if args.hub_repo_id:
         final_ckpt = output_dir / "checkpoints" / f"{args.steps:06d}" / "pretrained_model"
         logger.info(f"Pushing final checkpoint to {args.hub_repo_id}")
-        policy.push_to_hub(
-            args.hub_repo_id,
-            private=True,
-            local_dir=str(final_ckpt),
+        from huggingface_hub import HfApi
+
+        # Upload the saved folder as-is so normalization_stats.json goes with the weights.
+        api = HfApi()
+        api.create_repo(args.hub_repo_id, repo_type="model", private=True, exist_ok=True)
+        api.upload_folder(
+            folder_path=str(final_ckpt),
+            repo_id=args.hub_repo_id,
+            commit_message=f"Final checkpoint (step {args.steps})",
         )
 
     if use_wandb:
