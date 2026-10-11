@@ -12,7 +12,7 @@ import copy
 
 import torch
 
-from transforms import state_to_17d_torch, tcp_relative_torch
+from transforms import state_history_to_17d_torch, tcp_relative_torch
 
 # Validation split: hold these 5 episodes out of 51 (0-indexed)
 HELD_OUT_EPISODES = [4, 14, 24, 34, 44]
@@ -94,10 +94,12 @@ class CupToContainerDataset(torch.utils.data.Dataset):
         for k in self._drop:
             sample.pop(k, None)
 
-        state_raw = sample["observation.state"]   # (15,) float32 tensor
-        action_raw = sample["action"]              # (100, 8) float32 tensor
+        state_raw = sample["observation.state"]   # (15,), or (S, 15) with observation history
+        action_raw = sample["action"]              # (K, 8) float32 tensor
+        current_state = state_raw if state_raw.ndim == 1 else state_raw[-1]
 
-        sample["observation.state"] = state_to_17d_torch(state_raw)    # (17,)
-        sample["action"] = tcp_relative_torch(action_raw, state_raw)   # (100, 7)
+        sample["observation.state"] = state_history_to_17d_torch(state_raw)   # (17,) or (S, 17)
+        # Actions are relative to the current pose, even when the window starts in the past.
+        sample["action"] = tcp_relative_torch(action_raw, current_state)       # (K, 7)
 
         return sample

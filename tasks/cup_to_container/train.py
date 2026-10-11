@@ -29,10 +29,12 @@ import torch
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
-from lerobot.datasets import LeRobotDataset
+from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.datasets.sampler import EpisodeAwareSampler
 from lerobot.policies.act.configuration_act import ACTConfig
+from lerobot.policies.multi_task_dit.configuration_multi_task_dit import MultiTaskDiTConfig
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+from lerobot.policies.vita.configuration_vita import VitaConfig
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.utils.collate import lerobot_collate_fn
 from lerobot.utils.random_utils import set_seed
@@ -44,22 +46,24 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 def _json_stats_to_tensors(stats: dict, device: torch.device) -> dict:
-    """Convert {key: {mean: list, std: list}} -> {key: {mean: Tensor, std: Tensor}}."""
+    """Convert {key: {mean, std, min, max: list}} -> the same with Tensors (None entries dropped)."""
     out = {}
     for key, s in stats.items():
         if s.get("mean") is None:
             continue
         out[key] = {
-            "mean": torch.tensor(s["mean"], dtype=torch.float32, device=device),
-            "std": torch.tensor(s["std"], dtype=torch.float32, device=device),
+            name: torch.tensor(s[name], dtype=torch.float32, device=device)
+            for name in ("mean", "std", "min", "max")
+            if s.get(name) is not None
         }
     return out
 
 
-DEFAULT_CHUNK_SIZE = {"act": 100, "smolvla": 50}
+DEFAULT_CHUNK_SIZE = {"act": 100, "smolvla": 50, "multi_task_dit": 32, "vita": 32}
+FPS = 25
 
 
-def build_policy_config(policy_type: str, chunk_size: int) -> ACTConfig | SmolVLAConfig:
+def build_policy_config(policy_type: str, chunk_size: int):
     if policy_type == "act":
         return ACTConfig(
             input_features=None,
@@ -107,21 +111,66 @@ def build_policy_config(policy_type: str, chunk_size: int) -> ACTConfig | SmolVL
             scheduler_warmup_steps=1000,
             scheduler_decay_steps=30000,
         )
+    elif policy_type == "multi_task_dit":
+        # Settings follow docs/source/multi_task_dit.mdx (diffusion, DDPM, 100 train timesteps),
+        # with the small-dataset transformer size (< 100 episodes: 4 layers).
+        return MultiTaskDiTConfig(
+            input_features=None,
+            output_features=None,
+            n_obs_steps=2,
+            horizon=chunk_size,                # 32 steps = 1.28 s at 25 fps
+            n_action_steps=min(24, chunk_size),
+            objective="diffusion",
+            noise_scheduler_type="DDPM",
+            num_train_timesteps=100,
+            num_inference_steps=10,            # docs: faster inference; changeable at deploy time
+            num_layers=4,
+            hidden_dim=512,
+            num_heads=8,
+            # Cameras must share one size (they are stacked); BlueCupToContainer is 224x224.
+            # Resize to 240 then random-crop 224 (center crop at inference) for mild augmentation.
+            image_resize_shape=(240, 240),
+            image_crop_shape=(224, 224),
+            image_crop_is_random=True,
+        )
+    elif policy_type == "vita":
+        # Upstream defaults (flare/configs/policy/vita.yaml); horizons scaled for 25 fps:
+        # predict 32 steps (1.28 s), execute 16 (0.64 s). Cameras are resized to 240x320 and
+        # cropped to 224x308, as in the AV-ALOHA task configs.
+        return VitaConfig(
+            input_features=None,
+            output_features=None,
+            n_obs_steps=1,
+            horizon=chunk_size,
+            n_action_steps=chunk_size // 2,
+        )
     else:
         raise ValueError(f"Unknown policy_type: {policy_type}")
 
 
 def load_or_compute_stats(stats_path: Path, repo_id: str, dataset_dir: Path | None, video_backend: str,
-                          chunk_size: int) -> dict:
+                          chunk_size: int, action_start: int = 0) -> dict:
     if stats_path.exists():
         logger.info(f"Loading cached stats from {stats_path}")
         with open(stats_path) as f:
             return json.load(f)
     logger.info("No cached stats found — computing from training split (this takes a few minutes)...")
-    return compute_stats(repo_id, dataset_dir, stats_path, video_backend, chunk_size)
+    return compute_stats(repo_id, dataset_dir, stats_path, video_backend, chunk_size, action_start)
 
 
 def build_optimizer(policy_type: str, policy: torch.nn.Module, steps: int):
+    if policy_type in ("multi_task_dit", "vita"):
+        # The policy's own presets: AdamW + cosine schedule (DiT: CLIP vision encoder at 0.1x LR).
+        cfg = policy.config
+        optimizer = torch.optim.AdamW(
+            policy.get_optim_params(),
+            lr=cfg.optimizer_lr,
+            betas=cfg.optimizer_betas,
+            eps=cfg.optimizer_eps,
+            weight_decay=cfg.optimizer_weight_decay,
+        )
+        scheduler = cfg.get_scheduler_preset().build(optimizer, num_training_steps=steps)
+        return optimizer, scheduler
     if policy_type == "act":
         optimizer = torch.optim.AdamW(
             policy.parameters(),
@@ -173,20 +222,31 @@ def train(args):
     # ── stats ─────────────────────────────────────────────────────────────────
     dataset_dir = Path(args.dataset_dir) if args.dataset_dir else None
     chunk_size = args.chunk_size or DEFAULT_CHUNK_SIZE[args.policy_type]
+    policy_cfg = build_policy_config(args.policy_type, chunk_size)
+    action_offsets = list(policy_cfg.action_delta_indices)
     # TCP-relative action stats depend on the horizon (later steps drift further from the
-    # current pose), so the cache is keyed by chunk size as well as dataset.
-    stats_path = Path(__file__).parent / f"stats_{args.dataset_repo_id.split('/')[-1]}_chunk{chunk_size}.json"
+    # current pose) and on where the window starts, so the cache is keyed by both.
+    start_tag = f"_start{action_offsets[0]}" if action_offsets[0] != 0 else ""
+    stats_path = (Path(__file__).parent /
+                  f"stats_{args.dataset_repo_id.split('/')[-1]}_chunk{chunk_size}{start_tag}.json")
     stats_json = load_or_compute_stats(stats_path, args.dataset_repo_id, dataset_dir, args.video_backend,
-                                       chunk_size)
+                                       chunk_size, action_offsets[0])
     tensor_stats = _json_stats_to_tensors(stats_json, device)
 
     # ── dataset ───────────────────────────────────────────────────────────────
     logger.info(f"Loading {args.dataset_repo_id} (root={dataset_dir}) "
                 f"(training episodes: {TRAIN_EPISODES[:5]}...)")
+    delta_timestamps = {"action": [k / FPS for k in action_offsets]}
+    if policy_cfg.n_obs_steps > 1:
+        # Observation history (e.g. DiT: frames t-1 and t) for the state and every kept camera.
+        ds_meta = LeRobotDatasetMetadata(args.dataset_repo_id, root=dataset_dir)
+        obs_keys = ["observation.state"] + (args.cameras or list(ds_meta.camera_keys))
+        for key in obs_keys:
+            delta_timestamps[key] = [k / FPS for k in policy_cfg.observation_delta_indices]
     base_train = LeRobotDataset(
         repo_id=args.dataset_repo_id,
         root=dataset_dir,
-        delta_timestamps={"action": [k / 25.0 for k in range(chunk_size)]},
+        delta_timestamps=delta_timestamps,
         episodes=TRAIN_EPISODES,
         video_backend=args.video_backend,
         # Ship uint8 frames from DataLoader workers (4x less IPC than float32); converted on GPU below.
@@ -197,7 +257,6 @@ def train(args):
     logger.info(f"Training frames: {len(train_dataset)}")
 
     # ── policy ────────────────────────────────────────────────────────────────
-    policy_cfg = build_policy_config(args.policy_type, chunk_size)
     logger.info(f"Creating {args.policy_type} policy")
     policy = make_policy(cfg=policy_cfg, ds_meta=train_dataset.meta)
     policy = policy.to(device)
@@ -258,8 +317,18 @@ def train(args):
             config=vars(args),
         )
 
+    ema = None
+    if args.ema_power is not None:
+        # Exponential moving average of the weights; checkpoints store the EMA weights (as VITA does).
+        from diffusers.training_utils import EMAModel
+
+        ema = EMAModel(parameters=policy.parameters(), power=args.ema_power)
+        ema.to(device)
+    use_autocast = args.precision == "bf16"
+
     logger.info(f"Training: {args.steps} steps  batch={args.batch_size}  "
-                f"save_freq={args.save_freq}  device={device}")
+                f"save_freq={args.save_freq}  device={device}  precision={args.precision}  "
+                f"grad_clip={args.grad_clip}  ema_power={args.ema_power}")
 
     # ── training loop ─────────────────────────────────────────────────────────
     policy.train()
@@ -283,13 +352,15 @@ def train(args):
 
         optimizer.zero_grad(set_to_none=True)
         # bf16 autocast needs no loss scaling (unlike fp16), so there is no GradScaler.
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_autocast):
             loss, output_dict = model(batch)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(policy.parameters(), 10.0)
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), args.grad_clip)
         optimizer.step()
         if scheduler is not None:
             scheduler.step()
+        if ema is not None:
+            ema.step(policy.parameters())
 
         recent_losses.append(loss.item())
 
@@ -303,11 +374,18 @@ def train(args):
                         f"lr={lr:.2e}  {sps:.1f} steps/s  "
                         f"eta={((args.steps - step) / sps / 3600):.1f}h")
             if use_wandb:
+                extra = ({f"train/{k}": v for k, v in output_dict.items() if isinstance(v, (int, float))}
+                         if isinstance(output_dict, dict) else {})
                 wandb.log({"train/loss": avg_loss, "train/lr": lr,
-                           "train/steps_per_sec": sps}, step=step)
+                           "train/steps_per_sec": sps, **extra}, step=step)
 
         if step % args.save_freq == 0 or step == args.steps:
+            if ema is not None:
+                ema.store(policy.parameters())
+                ema.copy_to(policy.parameters())
             save_ckpt(policy, optimizer, scheduler, step, output_dir, stats_json)
+            if ema is not None:
+                ema.restore(policy.parameters())
 
     # ── push final checkpoint ─────────────────────────────────────────────────
     if args.hub_repo_id:
@@ -331,12 +409,16 @@ def train(args):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train ACT or SmolVLA on CupToContainer")
-    p.add_argument("--policy_type", choices=["act", "smolvla"], required=True)
+    p.add_argument("--policy_type", choices=["act", "smolvla", "multi_task_dit", "vita"], required=True)
     p.add_argument("--dataset_repo_id", required=True, help="e.g. andnetdeboer/BlueCupToContainer")
     p.add_argument("--dataset_dir", default=None,
                    help="Local dataset root; defaults to the HF cache (downloads if missing)")
     p.add_argument("--video_backend", choices=["torchcodec", "pyav"], default="torchcodec")
     p.add_argument("--compile", action="store_true", help="torch.compile the policy (ABC-style)")
+    p.add_argument("--precision", choices=["bf16", "fp32"], default="bf16")
+    p.add_argument("--grad_clip", type=float, default=10.0, help="Max grad norm (VITA upstream: 1.0)")
+    p.add_argument("--ema_power", type=float, default=None,
+                   help="Enable EMA of weights with this power (VITA upstream: 0.75); checkpoints save EMA weights")
     p.add_argument("--cameras", nargs="+", default=None,
                    help="Camera keys to train on (default: all), e.g. observation.images.left")
     p.add_argument("--chunk_size", type=int, default=None,

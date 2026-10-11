@@ -61,6 +61,13 @@ def state_to_17d_torch(state: torch.Tensor) -> torch.Tensor:
     return torch.from_numpy(state_to_17d_np(state_np))
 
 
+def state_history_to_17d_torch(states: torch.Tensor) -> torch.Tensor:
+    """(15,) → (17,), or (S, 15) observation history → (S, 17)."""
+    if states.ndim == 1:
+        return state_to_17d_torch(states)
+    return torch.stack([state_to_17d_torch(s) for s in states])
+
+
 def tcp_relative_torch(action_chunk: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
     """(K, 8) absolute goals + (15,) state → (K, 7) TCP-relative targets."""
     action_np = action_chunk.numpy()

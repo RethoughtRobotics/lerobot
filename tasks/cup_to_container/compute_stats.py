@@ -37,12 +37,17 @@ def _to_jsonable(obj):
 
 
 def compute_stats(repo_id: str, dataset_dir: Path | None, output_path: Path,
-                  video_backend: str = "torchcodec", chunk_size: int = 100) -> dict:
+                  video_backend: str = "torchcodec", chunk_size: int = 100,
+                  action_start: int = 0) -> dict:
     """Stats over the training split, read from the parquet columns only.
 
     Like ABC's states_actions.bin reader, this never decodes video: each frame's action
     chunk is rebuilt from the episode's action column, clamping past the episode end to its
     last frame, which matches LeRobotDataset's padding for delta_timestamps.
+
+    `action_start` shifts the chunk window: e.g. -1 for policies whose action window begins one
+    step before the current observation (Diffusion/DiT with n_obs_steps=2). Actions are always
+    made relative to the *current* state. Min/max are tracked too, for MIN_MAX policies.
     """
     print(f"Loading {repo_id} (root={dataset_dir})")
     dataset = LeRobotDataset(
@@ -65,15 +70,17 @@ def compute_stats(repo_id: str, dataset_dir: Path | None, output_path: Path,
     action_sum2 = np.zeros(7, dtype=np.float64)
     n_state = 0
     n_action = 0  # each frame contributes chunk_size action steps
+    state_min, state_max = np.full(17, np.inf), np.full(17, -np.inf)
+    action_min, action_max = np.full(7, np.inf), np.full(7, -np.inf)
 
-    offsets = np.arange(chunk_size)
+    offsets = np.arange(action_start, action_start + chunk_size)
     for ep in tqdm(np.unique(episodes), desc="Computing stats"):
         rows = np.flatnonzero(episodes == ep)
         ep_states, ep_actions = states[rows], actions[rows]
         last = len(rows) - 1
         for t in range(len(rows)):
             state_raw = ep_states[t]
-            action_raw = ep_actions[np.minimum(t + offsets, last)]   # (chunk_size, 8)
+            action_raw = ep_actions[np.clip(t + offsets, 0, last)]   # (chunk_size, 8)
 
             s17 = state_to_17d_np(state_raw)                 # (17,)
             a7 = tcp_relative_np(action_raw, state_raw)      # (chunk_size, 7)
@@ -85,6 +92,9 @@ def compute_stats(repo_id: str, dataset_dir: Path | None, output_path: Path,
             action_sum += a7.sum(axis=0)
             action_sum2 += (a7.astype(np.float64) ** 2).sum(axis=0)
             n_action += chunk_size
+            state_min, state_max = np.minimum(state_min, s17), np.maximum(state_max, s17)
+            action_min = np.minimum(action_min, a7.min(axis=0))
+            action_max = np.maximum(action_max, a7.max(axis=0))
 
     state_mean = state_sum / n_state
     state_std = np.sqrt(np.maximum(state_sum2 / n_state - state_mean ** 2, 1e-8))
@@ -96,14 +106,14 @@ def compute_stats(repo_id: str, dataset_dir: Path | None, output_path: Path,
         "observation.state": {
             "mean": state_mean.tolist(),
             "std": state_std.tolist(),
-            "min": None,
-            "max": None,
+            "min": state_min.tolist(),
+            "max": state_max.tolist(),
         },
         "action": {
             "mean": action_mean.tolist(),
             "std": action_std.tolist(),
-            "min": None,
-            "max": None,
+            "min": action_min.tolist(),
+            "max": action_max.tolist(),
         },
     }
 
