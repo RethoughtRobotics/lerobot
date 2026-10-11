@@ -5,6 +5,7 @@ Wraps a LeRobotDataset and:
   - transforms observation.state  (15-D) → (17-D)
   - transforms action             (K, 8) → (K, 7)  TCP-relative
   - exposes a patched meta.features with the new shapes
+  - optionally drops cameras (e.g. train wrist-only)
   - exposes patched meta.stats (passed in at construction)
 """
 import copy
@@ -30,13 +31,21 @@ class _PatchedMeta:
     def features(self):
         return self._features
 
+    @property
+    def video_keys(self):
+        return [k for k in self._meta.video_keys if k in self._features]
+
+    @property
+    def camera_keys(self):
+        return [k for k in self._meta.camera_keys if k in self._features]
+
     def __getattr__(self, name):
         return getattr(self._meta, name)
 
 
-def _patch_features(original_features: dict) -> dict:
+def _patch_features(original_features: dict, drop_keys: list[str]) -> dict:
     """Return a copy of the dataset feature dict with updated shapes for our transformed keys."""
-    features = copy.deepcopy(original_features)
+    features = {k: v for k, v in copy.deepcopy(original_features).items() if k not in drop_keys}
     # observation.state: 15 → 17
     if "observation.state" in features:
         features["observation.state"]["shape"] = [17]
@@ -64,9 +73,17 @@ class CupToContainerDataset(torch.utils.data.Dataset):
     100 steps including the repeated last-frame hold (see spec §3).
     """
 
-    def __init__(self, base_dataset, stats: dict):
+    def __init__(self, base_dataset, stats: dict, cameras: list[str] | None = None):
+        """`cameras`: video/image keys to keep; None keeps all. Dropped cameras are removed from
+        both the samples and meta.features, so the policy is built without them."""
         self._dataset = base_dataset
-        patched_features = _patch_features(dict(base_dataset.meta.features))
+        all_cameras = list(base_dataset.meta.camera_keys)
+        if cameras is not None:
+            unknown = set(cameras) - set(all_cameras)
+            if unknown:
+                raise ValueError(f"Unknown cameras {sorted(unknown)}; dataset has {all_cameras}")
+        self._drop = [] if cameras is None else [k for k in all_cameras if k not in cameras]
+        patched_features = _patch_features(dict(base_dataset.meta.features), self._drop)
         self.meta = _PatchedMeta(base_dataset.meta, patched_features, stats)
 
     def __len__(self) -> int:
@@ -74,6 +91,8 @@ class CupToContainerDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         sample = self._dataset[idx]
+        for k in self._drop:
+            sample.pop(k, None)
 
         state_raw = sample["observation.state"]   # (15,) float32 tensor
         action_raw = sample["action"]              # (100, 8) float32 tensor

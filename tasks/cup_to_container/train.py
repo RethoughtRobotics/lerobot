@@ -192,7 +192,8 @@ def train(args):
         # Ship uint8 frames from DataLoader workers (4x less IPC than float32); converted on GPU below.
         return_uint8=True,
     )
-    train_dataset = CupToContainerDataset(base_train, stats_json)
+    train_dataset = CupToContainerDataset(base_train, stats_json, cameras=args.cameras)
+    logger.info(f"Cameras: {train_dataset.meta.camera_keys}")
     logger.info(f"Training frames: {len(train_dataset)}")
 
     # ── policy ────────────────────────────────────────────────────────────────
@@ -336,6 +337,8 @@ def parse_args():
                    help="Local dataset root; defaults to the HF cache (downloads if missing)")
     p.add_argument("--video_backend", choices=["torchcodec", "pyav"], default="torchcodec")
     p.add_argument("--compile", action="store_true", help="torch.compile the policy (ABC-style)")
+    p.add_argument("--cameras", nargs="+", default=None,
+                   help="Camera keys to train on (default: all), e.g. observation.images.left")
     p.add_argument("--chunk_size", type=int, default=None,
                    help="Action chunk length in steps at 25 fps (default: act 100, smolvla 50)")
     p.add_argument("--output_dir", required=True)
