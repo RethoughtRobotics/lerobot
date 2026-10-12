@@ -21,6 +21,8 @@ def main():
     p.add_argument("repo_id")
     p.add_argument("--collection", default=None, help="HF collection slug to add the repo to")
     p.add_argument("--public", action="store_true", help="Create the repo public (default: private)")
+    p.add_argument("--only_steps", default=None,
+                   help="Comma-separated steps to upload (e.g. 10000,20000); the final step always goes to main")
     p.add_argument("--dry_run", action="store_true")
     args = p.parse_args()
 
@@ -30,6 +32,9 @@ def main():
     if not steps:
         raise SystemExit(f"No complete checkpoints under {ckpt_root}")
     final = steps[-1]
+    if args.only_steps:
+        keep = {int(x) for x in args.only_steps.split(",")}
+        steps = [s for s in steps if int(s.name) in keep]
     print(f"{args.repo_id}: {len(steps)} checkpoints, final = {final.name}", flush=True)
     if args.dry_run:
         for s in steps:

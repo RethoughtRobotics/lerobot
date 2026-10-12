@@ -33,7 +33,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 POLL_S = int(os.environ.get("PIPELINE_POLL_S", "60"))
 OOM_RE = re.compile(r"OutOfMemoryError|CUDA out of memory", re.I)
-NAN_RE = re.compile(r"loss=(nan|inf|-inf)\b", re.I)
+NAN_RE = re.compile(r"\bloss\s*[=:]\s*-?(nan|inf)\b", re.I)  # train.py "loss=" and lerobot-train "loss:"
 
 
 class Pipeline:
