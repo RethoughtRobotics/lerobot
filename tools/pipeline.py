@@ -193,6 +193,14 @@ class Pipeline:
         self.alert(f"{job['name']}: no GPU", f"no GPU with {need} MiB free within the wait limit", "ERROR")
         return None
 
+    @staticmethod
+    def check_job(job: dict) -> None:
+        """lerobot-train refuses an existing --output_dir, and tmux_train.sh creates the log's folder."""
+        out = next((a.split("=", 1)[1] for a in job.get("launch", []) if a.startswith("--output_dir=")), None)
+        if out and Path(job["log"]).resolve().is_relative_to(Path(out).resolve()):
+            raise SystemExit(f"[{job['name']}] log {job['log']} is inside lerobot-train --output_dir {out}; "
+                             "put the log outside it, or lerobot-train will refuse to start")
+
     def build_cmd(self, job: dict, attempt: int) -> list[str]:
         args = list(job["launch"])
         retries = job.get("retries", [])
@@ -296,6 +304,8 @@ class Pipeline:
             self.save()
 
     def run(self) -> None:
+        for job in self.cfg["jobs"]:
+            self.check_job(job)
         self.log(f"pipeline start (PID {os.getpid()})")
         (self.state_dir / "supervisor.pid").write_text(str(os.getpid()))
         for job in self.cfg["jobs"]:
