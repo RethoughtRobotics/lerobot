@@ -13,7 +13,7 @@ for training policies on new robots and tasks. On top of upstream it adds:
 ## Setup
 
 ```bash
-uv sync --locked --extra cup --extra piper --extra molmoact2 --extra async
+uv sync --locked --extra cup --extra piper --extra molmoact2 --extra async --extra groot
 source .venv/bin/activate
 ```
 
@@ -53,6 +53,28 @@ anything not in the lockfile.
 `--resize_mode pad` (the default, as in ABC) keeps the whole frame and pads it with black.
 `--resize_mode crop` center-crops instead, which avoids padding but loses the edges of the frame.
 Inference must apply the same resize to live camera frames.
+
+## Unattended training queues
+
+`tools/pipeline.py <pipeline.json>` runs a list of jobs in order and watches each one, so a queue
+keeps going overnight without anyone (or any Claude session) watching:
+
+- **Ordering:** `after` (previous job finished), optional `precheck` command polled until it
+  passes (e.g. access to a gated model), and a GPU with `gpu_mem_mib` free.
+- **Watchdogs:** process exit, `success_regex` in the log, a stalled log (`stall_minutes`), and
+  NaN/inf loss. Stalled or NaN runs are killed.
+- **Recovery:** after an out-of-memory error, retries with the next `retries` override (e.g. a
+  smaller `--batch_size`). Any failure before the first checkpoint gets one more try.
+- **After success:** runs `on_success` commands, usually
+  `tools/upload_checkpoints.py <run_dir> <repo_id> --collection <slug>` (every checkpoint as a
+  `step-XXXXXX` branch, final on `main`).
+- **Alerts:** `<state_dir>/alerts.log`, and W&B alerts (`wandb_alert`) that W&B can email you.
+- **Restartable:** state lives in `<state_dir>/state.json`. A cron job running the
+  `cron_watchdog.sh` pattern restarts a dead supervisor, which skips finished jobs and re-attaches
+  to running ones.
+
+Example: `/data/users/kmy2091/rethought-lerobot-outputs/pipeline_2026-10-11/pipeline.json`
+(VITA -> Multi-Task DiT -> GR00T).
 
 ## Tasks
 
