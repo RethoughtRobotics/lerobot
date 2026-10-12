@@ -43,7 +43,17 @@ def main():
 
     api = HfApi()
     api.create_repo(args.repo_id, repo_type="model", private=not args.public, exist_ok=True)
-    existing = {b.name for b in api.list_repo_refs(args.repo_id).branches}
+    refs = api.list_repo_refs(args.repo_id)
+    existing = {b.name for b in refs.branches}
+    tags = {t.name for t in refs.tags}
+
+    def is_complete(ckpt: Path, revision: str) -> bool:
+        remote = {s.rfilename: s.size for s in
+                  api.model_info(args.repo_id, revision=revision, files_metadata=True).siblings}
+        files = [f for f in (ckpt / "pretrained_model").iterdir() if f.is_file()]
+        if (ckpt / "training_step.pt").exists():
+            files.append(ckpt / "training_step.pt")
+        return all(remote.get(f.name) == f.stat().st_size for f in files)
 
     def upload(ckpt: Path, revision: str, message: str) -> None:
         api.upload_folder(folder_path=ckpt / "pretrained_model", repo_id=args.repo_id,
@@ -60,7 +70,10 @@ def main():
 
     for s in steps:
         branch = f"step-{s.name}"
-        if branch in existing:
+        if branch in tags:  # a same-named tag blocks commits to the branch
+            api.delete_tag(args.repo_id, tag=branch)
+            print(f"  {branch}: removed conflicting tag", flush=True)
+        if branch in existing and is_complete(s, branch):
             print(f"  {branch}: already uploaded, skipping", flush=True)
             continue
         api.create_branch(args.repo_id, branch=branch, exist_ok=True)
