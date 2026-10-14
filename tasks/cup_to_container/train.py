@@ -40,7 +40,7 @@ from lerobot.utils.collate import lerobot_collate_fn
 from lerobot.utils.random_utils import set_seed
 
 from compute_stats import compute_stats
-from wrapped_dataset import CupToContainerDataset, TRAIN_EPISODES
+from wrapped_dataset import CupToContainerDataset, HELD_OUT_EPISODES, TRAIN_EPISODES
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", force=True)
 logger = logging.getLogger(__name__)
@@ -213,6 +213,36 @@ def save_ckpt(policy, optimizer, scheduler, step: int, output_dir: Path, stats: 
     logger.info(f"Checkpoint saved → {ckpt_dir}")
 
 
+@torch.no_grad()
+def evaluate(model, policy, dataloader, preprocessor, device, use_autocast: bool) -> dict:
+    """Mean loss (and loss components) over the held-out episodes, in eval mode.
+
+    The RNG is reseeded so that stochastic losses (flow/diffusion noise, timesteps) draw the same
+    samples every time, which keeps the curve comparable across steps.
+    """
+    policy.eval()
+    totals: dict[str, float] = {}
+    n = 0
+    with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
+        torch.manual_seed(0)
+        for batch in dataloader:
+            for k in list(batch.keys()):
+                if "image" in k and batch[k].dtype == torch.uint8:
+                    batch[k] = batch[k].to(device, non_blocking=True).to(torch.float32) / 255.0
+            batch = preprocessor(batch)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_autocast):
+                loss, output_dict = model(batch)
+            bs = len(batch["action"])
+            totals["loss"] = totals.get("loss", 0.0) + loss.item() * bs
+            if isinstance(output_dict, dict):
+                for k, v in output_dict.items():
+                    if isinstance(v, (int, float)):
+                        totals[k] = totals.get(k, 0.0) + v * bs
+            n += bs
+    policy.train()
+    return {k: v / max(n, 1) for k, v in totals.items()}
+
+
 def train(args):
     set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -299,6 +329,30 @@ def train(args):
         persistent_workers=args.num_workers > 0,
     )
 
+    val_dataloader = None
+    if args.val_freq > 0:
+        base_val = LeRobotDataset(
+            repo_id=args.dataset_repo_id,
+            root=dataset_dir,
+            delta_timestamps=delta_timestamps,
+            episodes=HELD_OUT_EPISODES,
+            video_backend=args.video_backend,
+            return_uint8=True,
+        )
+        val_dataset = CupToContainerDataset(base_val, stats_json, cameras=args.cameras)
+        logger.info(f"Validation frames: {len(val_dataset)} (episodes {HELD_OUT_EPISODES})")
+        val_workers = min(4, args.num_workers)
+        val_dataloader = torch.utils.data.DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=val_workers,
+            pin_memory=device.type == "cuda",
+            drop_last=False,
+            collate_fn=collate_fn,
+            persistent_workers=val_workers > 0,
+        )
+
     # ── WandB ─────────────────────────────────────────────────────────────────
     use_wandb = bool(args.wandb_project)
     # `model` runs the forward pass; `policy` stays uncompiled for save_pretrained / push_to_hub.
@@ -379,6 +433,18 @@ def train(args):
                 wandb.log({"train/loss": avg_loss, "train/lr": lr,
                            "train/steps_per_sec": sps, **extra}, step=step)
 
+        if val_dataloader is not None and (step % args.val_freq == 0 or step == args.steps):
+            # Validate the EMA weights, since those are what the checkpoints store.
+            if ema is not None:
+                ema.store(policy.parameters())
+                ema.copy_to(policy.parameters())
+            val_metrics = evaluate(model, policy, val_dataloader, preprocessor, device, use_autocast)
+            if ema is not None:
+                ema.restore(policy.parameters())
+            logger.info(f"step {step:6d}/{args.steps}  val_loss={val_metrics['loss']:.4f}")
+            if use_wandb:
+                wandb.log({f"val/{k}": v for k, v in val_metrics.items()}, step=step)
+
         if step % args.save_freq == 0 or step == args.steps:
             if ema is not None:
                 ema.store(policy.parameters())
@@ -428,6 +494,8 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--save_freq", type=int, default=10_000)
     p.add_argument("--log_freq", type=int, default=200)
+    p.add_argument("--val_freq", type=int, default=2000,
+                   help="Log loss on the held-out episodes every N steps (0 disables)")
     p.add_argument("--num_workers", type=int, default=8)
     p.add_argument("--hub_repo_id", type=str, default=None)
     p.add_argument("--wandb_project", type=str, default=None)
