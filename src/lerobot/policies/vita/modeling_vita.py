@@ -245,11 +245,23 @@ class ResNetObserver(nn.Module):
             images = images[..., top : top + ch, left : left + cw]
         return (images - self.img_mean) / self.img_std
 
+    def _drop_cameras(self, img_feats: Tensor, b: int, s: int) -> Tensor:
+        """Zero each camera's features per sample with its `camera_dropout` probability (same choice
+        across the sample's obs steps); samples that would lose every camera keep them all."""
+        p = torch.tensor([self.config.camera_dropout.get(k, 0.0) for k in self.image_keys],
+                         device=img_feats.device)
+        drop = torch.rand(b, len(self.image_keys), device=img_feats.device) < p
+        drop &= ~drop.all(dim=1, keepdim=True)
+        keep = einops.repeat(~drop, "b n -> (b s n) 1 1 1", s=s).to(img_feats.dtype)
+        return img_feats * keep
+
     def forward(self, batch: dict[str, Tensor]) -> Tensor:
         state = batch[OBS_STATE]
         b, s = state.shape[:2]
         n = len(self.image_keys)
         img_feats = self.pool(self.backbone(self._images(batch))["feature_map"])
+        if self.training and self.config.camera_dropout:
+            img_feats = self._drop_cameras(img_feats, b, s)
         img_feats = einops.rearrange(img_feats, "(b s n) c h w -> b (s n c h w)", b=b, s=s, n=n)
         return torch.cat([state.flatten(start_dim=1), img_feats], dim=1)
 

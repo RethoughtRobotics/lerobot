@@ -54,6 +54,9 @@ class VitaConfig(PreTrainedConfig):
     pretrained_backbone_weights: str | None = "ResNet18_Weights.IMAGENET1K_V1"
     resize_shape: tuple[int, int] = (240, 320)  # every camera is resized to this before stacking
     crop_shape: tuple[int, int] | None = (224, 308)  # random crop in training, center crop in eval
+    # Camera dropout (training only): {image key: probability} of zeroing that camera's features per
+    # sample, e.g. {"observation.images.third_eye": 0.3}. A sample never loses every camera.
+    camera_dropout: dict[str, float] = field(default_factory=dict)
 
     # VITA objective
     latent_dim: int = 512
@@ -115,6 +118,9 @@ class VitaConfig(PreTrainedConfig):
             self.crop_shape[0] > self.resize_shape[0] or self.crop_shape[1] > self.resize_shape[1]
         ):
             raise ValueError(f"`crop_shape` {self.crop_shape} must fit in `resize_shape` {self.resize_shape}.")
+        for key, p in self.camera_dropout.items():
+            if not 0.0 <= p < 1.0:
+                raise ValueError(f"`camera_dropout[{key!r}]` must be in [0, 1). Got {p}.")
 
     def get_optimizer_preset(self) -> AdamConfig:
         return AdamConfig(
