@@ -19,6 +19,7 @@ State is kept in `<state_dir>/state.json`, so the supervisor can be restarted at
 Usage:
     python tools/pipeline.py path/to/pipeline.json
 """
+import fcntl
 import json
 import os
 import re
@@ -272,11 +273,22 @@ class Pipeline:
             if pid:
                 self.log(f"[{name}] attached to running PID {pid}")
             elif job.get("launch"):
-                gpu = self.wait_gpu(job)
-                if gpu is None:
-                    self.set_status(name, "failed", reason="no GPU")
-                    return
-                pid = self.launch(job, gpu, st["attempt"])
+                # `gpu_lock`: a file shared by pipelines that run side by side, so they pick GPUs one at a
+                # time and each launch has `gpu_settle_s` to allocate its memory before the next looks.
+                lock = open(job["gpu_lock"], "a") if job.get("gpu_lock") else None
+                if lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                try:
+                    gpu = self.wait_gpu(job)
+                    if gpu is None:
+                        self.set_status(name, "failed", reason="no GPU")
+                        return
+                    pid = self.launch(job, gpu, st["attempt"])
+                    if lock and pid:
+                        time.sleep(job.get("gpu_settle_s", 240))
+                finally:
+                    if lock:
+                        lock.close()
                 if pid is None:
                     outcome = "crashed"
             if pid:

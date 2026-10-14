@@ -27,8 +27,10 @@ def main():
     args = p.parse_args()
 
     ckpt_root = args.run_dir.resolve() / "checkpoints"
+    # Full checkpoints hold model.safetensors; PEFT (LoRA) checkpoints hold adapter_model.safetensors.
     steps = sorted(d for d in ckpt_root.iterdir()
-                   if d.is_dir() and d.name.isdigit() and (d / "pretrained_model" / "model.safetensors").exists())
+                   if d.is_dir() and d.name.isdigit() and any(
+                       (d / "pretrained_model" / f).exists() for f in ("model.safetensors", "adapter_model.safetensors")))
     if not steps:
         raise SystemExit(f"No complete checkpoints under {ckpt_root}")
     final = steps[-1]
