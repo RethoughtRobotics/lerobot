@@ -917,7 +917,7 @@ def train(cfg: TrainPipelineConfig) -> None:
         is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0
         is_saving_step = should_save_checkpoint(step, cfg.save_freq, cfg.steps)
         is_env_eval_step = cfg.env_eval_freq > 0 and step % cfg.env_eval_freq == 0
-        is_eval_step = cfg.eval_steps > 0 and step % cfg.eval_steps == 0
+        is_eval_step = bool(cfg.eval_steps) and (step % cfg.eval_steps == 0 or step == cfg.steps)
 
         if is_log_step:
             # Collective reduce must run on every rank, before the main-process gate below.
@@ -943,25 +943,31 @@ def train(cfg: TrainPipelineConfig) -> None:
 
         if is_eval_step and eval_dataloader is not None:
             policy.eval()
-            eval_loss_sum = 0.0
+            # Sums of the total loss and of each scalar sub-loss (l1_loss, kld_loss, ...).
+            eval_sums: dict[str, float] = {}
             n_eval_batches = 0
             with torch.no_grad(), accelerator.autocast():
                 for eval_batch in eval_dataloader:
                     eval_batch = _preprocess_dataset_batch(
                         eval_batch, dataset.meta.camera_keys, cfg.rename_map, preprocessor
                     )
-                    loss, _ = policy(eval_batch)  # __call__, so FSDP2 forward hooks run
-                    eval_loss_sum += loss.item()
+                    loss, output_dict = policy(eval_batch)  # __call__, so FSDP2 forward hooks run
+                    eval_sums["eval_loss"] = eval_sums.get("eval_loss", 0.0) + loss.item()
+                    for k, v in (output_dict or {}).items():
+                        if isinstance(v, (int, float)) and not isinstance(v, bool):
+                            eval_sums[k] = eval_sums.get(k, 0.0) + float(v)
                     n_eval_batches += 1
-            eval_loss = eval_loss_sum / max(n_eval_batches, 1)
-            eval_loss = torch.tensor(eval_loss, device=device)
-            eval_loss = accelerator.reduce(eval_loss, reduction="mean").item()
+            eval_metrics = {}
+            # Sorted so every rank reduces the same keys in the same order.
+            for k in sorted(eval_sums):
+                mean = torch.tensor(eval_sums[k] / max(n_eval_batches, 1), device=device)
+                eval_metrics[k] = accelerator.reduce(mean, reduction="mean").item()
             policy.train()
 
             if is_main_process():
-                logging.info(f"step {step}: eval_loss={eval_loss:.4f}")
+                logging.info(f"step {step}: eval_loss={eval_metrics.get('eval_loss', float('nan')):.4f}")
                 if wandb_logger:
-                    wandb_logger.log_dict({"eval_loss": eval_loss}, step=step, mode="eval")
+                    wandb_logger.log_dict(eval_metrics, step=step, mode="eval")
 
         if cfg.save_checkpoint and is_saving_step:
             # Collective: every rank participates (gathers / DCP shard writes); rank-0-only file

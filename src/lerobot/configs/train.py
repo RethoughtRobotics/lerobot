@@ -143,10 +143,11 @@ class TrainPipelineConfig(HubMixin):
     # Run policy in the simulation environment every N steps to measure reward/success (0 = disabled).
     env_eval_freq: int = 20_000
     log_freq: int = 200
-    # Compute eval loss on held-out episodes every N steps (0 = disabled). Requires eval_split > 0.
-    eval_steps: int = 0
+    # Compute eval loss on held-out episodes every N steps and at the last step (0 = disabled).
+    # Requires eval_split > 0. None (default) resolves to 2000, or to 0 when there is no held-out split.
+    eval_steps: int | None = None
     # Cap on total eval samples, split uniformly across tasks (0 = use all held-out data).
-    max_eval_samples: int = 0
+    max_eval_samples: int = 2048
     tolerance_s: float = 1e-4
     save_checkpoint: bool = True
     # Checkpoint is saved every `save_freq` training iterations and after the last training step.
@@ -311,6 +312,8 @@ class TrainPipelineConfig(HubMixin):
             self.optimizer = active_cfg.get_optimizer_preset()
             self.scheduler = active_cfg.get_scheduler_preset()
 
+        if self.eval_steps is None:
+            self.eval_steps = 2000 if self.dataset.eval_split else 0
         if self.eval_steps > 0 and self.dataset.eval_split == 0.0:
             raise ValueError("eval_steps > 0 requires dataset.eval_split > 0.0 to hold out eval data.")
 

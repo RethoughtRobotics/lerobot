@@ -222,12 +222,14 @@ def make_train_eval_datasets(
 ) -> tuple[LeRobotDataset | StreamingLeRobotDataset, LeRobotDataset | None]:
     """Create train and optional eval datasets by splitting episodes based on eval_split.
 
-    The last ceil(n_episodes * eval_split) episodes per task are held out for evaluation.
-    If eval_split == 0.0, returns (full_dataset, None).
+    The last ceil(n_episodes * eval_split) episodes per task are held out for evaluation, but a
+    task's only episode is never held out. If eval_split == 0.0, or no task has two or more
+    episodes, returns (full_dataset, None).
     """
     full_dataset = make_dataset(cfg)
 
-    if cfg.dataset.eval_split == 0.0:
+    eval_split = cfg.dataset.eval_split or 0.0
+    if eval_split == 0.0:
         return full_dataset, None
 
     base_episodes = (
@@ -242,14 +244,16 @@ def make_train_eval_datasets(
 
     train_episodes, eval_episodes = [], []
     for eps in task_to_episodes.values():
-        n_eval = math.ceil(len(eps) * cfg.dataset.eval_split)
+        n_eval = min(math.ceil(len(eps) * eval_split), len(eps) - 1)
         train_episodes.extend(eps[: len(eps) - n_eval])
         eval_episodes.extend(eps[len(eps) - n_eval :])
 
-    if not train_episodes:
-        raise ValueError(
-            f"eval_split={cfg.dataset.eval_split} leaves 0 training episodes from {len(base_episodes)} total."
+    if not eval_episodes:
+        logger.warning(
+            f"eval_split={eval_split}: no task has 2+ episodes to hold one out; training on all "
+            f"{len(base_episodes)} episodes without eval loss."
         )
+        return full_dataset, None
 
     logger.info(
         f"Train/eval split: {len(train_episodes)} train, {len(eval_episodes)} eval "

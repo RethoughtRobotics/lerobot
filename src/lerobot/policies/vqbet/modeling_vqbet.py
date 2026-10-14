@@ -473,6 +473,9 @@ class VQBeTHead(nn.Module):
         )
         n_different_combinations = len(torch.unique(metric[2], dim=0))
         recon_l1_error = metric[0].detach().cpu().item()
+        if not self.training:
+            # Eval-loss batches must not count toward the RVQ training budget (or freeze it early).
+            return loss, n_different_codes, n_different_combinations, recon_l1_error
         self.vqvae_model.optimized_steps += 1
         # if we updated RVQ more than `n_vqvae_training_steps` steps, we freeze the RVQ part.
         if self.vqvae_model.optimized_steps >= n_vqvae_training_steps:

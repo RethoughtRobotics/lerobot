@@ -73,9 +73,12 @@ class DatasetConfig:
     # Map-style: only for non-default storage formats (e.g. lance), per DataLoader worker.
     video_decoder_cache_size: int | None = None
     # Fraction of episodes held out per task for offline evaluation (0.0 = disabled).
-    eval_split: float = 0.0
+    # None (default) resolves to 0.1, or to 0.0 for streaming datasets, which cannot be split.
+    eval_split: float | None = None
 
     def __post_init__(self) -> None:
+        if self.eval_split is None:
+            self.eval_split = 0.0 if self.streaming else 0.1
         if self.repo_type not in ("dataset", "bucket"):
             raise ValueError(f"repo_type must be 'dataset' or 'bucket', got {self.repo_type!r}")
         if self.eval_split != 0.0 and self.streaming:
@@ -261,6 +264,11 @@ class PeftConfig:
     # If None, the PEFT library defaults to alpha=8, which may dampen high-rank adapters.
     # Common values are r (alpha == rank) or 2*r.
     lora_alpha: int | None = None
+
+    # Per-module overrides of `r` / `lora_alpha`, as {module name regex: value}. Corresponds to PEFT's
+    # `rank_pattern` / `alpha_pattern`, e.g. a higher rank for the action expert than for the VLM.
+    rank_pattern: dict[str, int] | None = None
+    alpha_pattern: dict[str, int] | None = None
 
 
 @dataclass
