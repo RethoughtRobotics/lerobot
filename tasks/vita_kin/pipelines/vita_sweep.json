@@ -1,0 +1,47 @@
+{
+  "state_dir": "/data/users/kmy2091/rethought-lerobot-outputs/pipeline_2026-10-14_vita_sweep",
+  "wandb_alert": {
+    "entity": "deboerandnet-northwestern-university",
+    "project": "rethoughtai-watchdog"
+  },
+  "jobs": [
+    {
+      "name": "vita_sweep",
+      "precheck": "/home/kmy2091/rethought-lerobot/.venv/bin/python tools/dataset_ready.py andnetdeboer/SweepTrash_Kin --settle_minutes 5",
+      "precheck_hint": "waiting for andnetdeboer/SweepTrash_Kin on the Hub (rechecked every 10 min; starts once it exists and is fully uploaded (all files referenced by its metadata present, 5 min quiet))",
+      "precheck_poll_minutes": 10,
+      "precheck_timeout_hours": 168,
+      "session": "vita-sweep",
+      "gpu_mem_mib": 11000,
+      "max_gpu_wait_hours": 96,
+      "gpu_lock": "/data/users/kmy2091/rethought-lerobot-outputs/vita_gpu.lock",
+      "gpu_settle_s": 240,
+      "match": "rethought-lerobot-outputs/vita_SweepTrash_Kin",
+      "log": "/data/users/kmy2091/rethought-lerobot-outputs/logs/vita_SweepTrash_Kin_train.log",
+      "run_dir": "/data/users/kmy2091/rethought-lerobot-outputs/vita_SweepTrash_Kin",
+      "success_regex": "End of training",
+      "env": {
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
+      },
+      "launch": [
+        "tools/train_vita_hub.sh",
+        "andnetdeboer/SweepTrash_Kin",
+        "/data/users/kmy2091/rethought-lerobot-outputs/vita_SweepTrash_Kin",
+        "andnetdeboer/vita_SweepTrash_Kin",
+        "--batch_size=128"
+      ],
+      "retries": [
+        {
+          "--batch_size": "64"
+        },
+        {
+          "--batch_size": "32"
+        }
+      ],
+      "stall_minutes": 30,
+      "on_success": [
+        "/home/kmy2091/rethought-lerobot/.venv/bin/python tools/upload_checkpoints.py /data/users/kmy2091/rethought-lerobot-outputs/vita_SweepTrash_Kin andnetdeboer/vita_SweepTrash_Kin --collection andnetdeboer/rethoughtai-6ac6adec399ec52e90e21556"
+      ]
+    }
+  ]
+}
