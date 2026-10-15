@@ -75,6 +75,10 @@ class MultiTaskDiTConfig(PreTrainedConfig):
     image_resize_shape: tuple[int, int] | None = None  # Resize images before crop
     image_crop_shape: tuple[int, int] | None = (224, 224)  # Crop shape (CLIP default)
     image_crop_is_random: bool = True  # Random crop during training, center at inference
+    # Training-only camera feature dropout by image key, e.g. {"observation.images.third_eye": 0.3}.
+    # Per sample, the same keep/drop choice is applied across observation steps, and at least one
+    # camera is always kept.
+    camera_dropout: dict[str, float] = field(default_factory=dict)
 
     # Text Encoder (CLIP)
     text_encoder_name: str = "openai/clip-vit-base-patch16"  # HuggingFace CLIP model
@@ -149,6 +153,9 @@ class MultiTaskDiTConfig(PreTrainedConfig):
                 self.image_resize_shape,
             )
             self.image_crop_shape = None
+        for key, p in self.camera_dropout.items():
+            if not 0.0 <= p < 1.0:
+                raise ValueError(f"camera_dropout[{key!r}] must be in [0, 1), got {p}")
 
         # Text encoder validation
         if "clip" not in self.text_encoder_name.lower():
@@ -228,7 +235,7 @@ class MultiTaskDiTConfig(PreTrainedConfig):
         if len(self.image_features) > 0:
             first_key, first_ft = next(iter(self.image_features.items()))
             for key, image_ft in self.image_features.items():
-                if image_ft.shape != first_ft.shape:
+                if self.image_resize_shape is None and image_ft.shape != first_ft.shape:
                     raise ValueError(
                         f"Image '{key}' shape {image_ft.shape} != '{first_key}' shape {first_ft.shape}"
                     )

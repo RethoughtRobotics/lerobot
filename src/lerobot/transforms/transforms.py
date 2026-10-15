@@ -683,6 +683,12 @@ class ImageTransformsConfig:
             ),
         }
     )
+    # Resize every frame to (height, width) before the sampled transforms. Set it to the policy's own resize
+    # shape (e.g. [240, 320]) so augmentation runs on the pixels the policy keeps — several times cheaper on
+    # the CPU workers — and the policy's resize becomes a no-op. Match `resize_antialias` to the policy's
+    # resize (MultiTask DiT: torchvision Resize with antialias; VITA: F.interpolate, no antialias).
+    resize_shape: list[int] | None = None
+    resize_antialias: bool = True
 
 
 def make_transform_from_config(cfg: ImageTransformConfig) -> Transform:
@@ -726,6 +732,13 @@ class ImageTransforms(Transform):
                 n_subset=n_subset,
                 random_order=cfg.random_order,
             )
+        if cfg.enable and cfg.resize_shape is not None:
+            resize = v2.Resize(
+                list(cfg.resize_shape),
+                interpolation=v2.InterpolationMode.BILINEAR,
+                antialias=cfg.resize_antialias,
+            )
+            self.tf = v2.Compose([resize, self.tf])
 
     def forward(self, *inputs: Any) -> Any:
         return self.tf(*inputs)

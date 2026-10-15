@@ -169,7 +169,13 @@ class MultiTaskDiTPolicy(PreTrainedPolicy):
         """Prepare batch by stacking image features if needed."""
         if self.config.image_features:
             batch = dict(batch)  # shallow copy to avoid modifying original
-            batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
+            images = [batch[key] for key in self.config.image_features]
+            # Cameras of different sizes (e.g. 640x400 wrist, 640x480 third-eye) cannot be stacked; bring each
+            # to image_resize_shape first with the encoder's own Resize, which then leaves them unchanged.
+            if len({img.shape[-2:] for img in images}) > 1 and self.observation_encoder.do_resize:
+                resize = self.observation_encoder.resize
+                images = [resize(img.flatten(0, -4)).unflatten(0, img.shape[:-3]) for img in images]
+            batch[OBS_IMAGES] = torch.stack(images, dim=-4)
 
         return batch
 
@@ -301,6 +307,21 @@ class ObservationEncoder(nn.Module):
             images = self.maybe_random_crop(images) if self.training else self.center_crop(images)
         return images
 
+    def _apply_camera_dropout(self, images: Tensor) -> Tensor:
+        """Drop camera streams per sample using config.camera_dropout, never dropping all cameras."""
+        if not self.training or not self.config.camera_dropout or self.num_cameras == 0:
+            return images
+
+        b = images.shape[0]
+        probs = torch.tensor(
+            [self.config.camera_dropout.get(name, 0.0) for name in self.camera_names],
+            device=images.device,
+        )
+        drop = torch.rand(b, self.num_cameras, device=images.device) < probs
+        drop &= ~drop.all(dim=1, keepdim=True)
+        keep = (~drop).to(images.dtype).view(b, 1, self.num_cameras, 1, 1, 1)
+        return images * keep
+
     def _setup_preprocessing(self, config):
         if config.image_resize_shape is not None:
             self.do_resize = True
@@ -349,6 +370,8 @@ class ObservationEncoder(nn.Module):
 
             if len(images.shape) == 5:
                 images = images.unsqueeze(1)
+
+            images = self._apply_camera_dropout(images)
 
             if self.config.use_separate_rgb_encoder_per_camera:
                 camera_features = []
