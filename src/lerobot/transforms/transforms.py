@@ -689,6 +689,10 @@ class ImageTransformsConfig:
     # resize (MultiTask DiT: torchvision Resize with antialias; VITA: F.interpolate, no antialias).
     resize_shape: list[int] | None = None
     resize_antialias: bool = True
+    # Alternative to resize_shape that keeps each camera's aspect ratio: scale to fit inside (height, width), as
+    # SmolVLA's resize_with_pad does before padding (640x480 -> 384x512, 640x400 -> 320x512 for 512x512). With
+    # resize_fit = the policy's pad target, the policy's own resize becomes a no-op.
+    resize_fit: list[int] | None = None
 
 
 def make_transform_from_config(cfg: ImageTransformConfig) -> Transform:
@@ -704,6 +708,24 @@ def make_transform_from_config(cfg: ImageTransformConfig) -> Transform:
         f"Transform '{cfg.type}' is not valid. It must be a class in "
         f"torchvision.transforms.v2 or one of: {valid_custom}."
     )
+
+
+class FitResize(Transform):
+    """Bilinear resize to fit inside (height, width) keeping the aspect ratio; same size arithmetic as
+    lerobot.policies.common.vla_utils.resize_with_pad (int truncation), without the padding."""
+
+    def __init__(self, size: Sequence[int], antialias: bool = True) -> None:
+        super().__init__()
+        self.height, self.width = int(size[0]), int(size[1])
+        self.antialias = antialias
+
+    def transform(self, inpt: Any, params: dict[str, Any]) -> Any:
+        h, w = inpt.shape[-2:]
+        ratio = max(w / self.width, h / self.height)
+        size = [int(h / ratio), int(w / ratio)]
+        if size == [h, w]:
+            return inpt
+        return v2.functional.resize(inpt, size, interpolation=v2.InterpolationMode.BILINEAR, antialias=self.antialias)
 
 
 class ImageTransforms(Transform):
@@ -732,6 +754,10 @@ class ImageTransforms(Transform):
                 n_subset=n_subset,
                 random_order=cfg.random_order,
             )
+        if cfg.enable and cfg.resize_fit is not None:
+            if cfg.resize_shape is not None:
+                raise ValueError("Set at most one of resize_shape and resize_fit")
+            self.tf = v2.Compose([FitResize(cfg.resize_fit, antialias=cfg.resize_antialias), self.tf])
         if cfg.enable and cfg.resize_shape is not None:
             resize = v2.Resize(
                 list(cfg.resize_shape),
