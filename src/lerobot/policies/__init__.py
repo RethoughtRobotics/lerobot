@@ -39,8 +39,12 @@ from .utils import make_robot_action, prepare_observation_for_inference
 from .vita.configuration_vita import VitaConfig as VitaConfig
 from .vla_jepa.configuration_vla_jepa import VLAJEPAConfig as VLAJEPAConfig
 from .vqbet.configuration_vqbet import VQBeTConfig as VQBeTConfig
-from .wall_x.configuration_wall_x import WallXConfig as WallXConfig
 from .xvla.configuration_xvla import XVLAConfig as XVLAConfig
+
+try:
+    from .wall_x.configuration_wall_x import WallXConfig as WallXConfig
+except Exception:  # pragma: no cover - optional dependency/version mismatch
+    WallXConfig = None
 
 # NOTE: Policy modeling classes (e.g., GaussianActorPolicy) are intentionally NOT re-exported here.
 # They have heavy optional dependencies and are loaded lazily via get_policy_class().

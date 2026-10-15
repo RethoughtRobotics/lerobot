@@ -32,7 +32,8 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import torch.distributed as dist
-from huggingface_hub import HfApi, ModelCard, ModelCardData, is_offline_mode, model_info, snapshot_download
+from huggingface_hub import HfApi, ModelCard, ModelCardData, model_info, snapshot_download
+from huggingface_hub import constants as hf_hub_constants
 from huggingface_hub.errors import HFValidationError, OfflineModeIsEnabled
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
@@ -58,7 +59,7 @@ from lerobot.optim import (
     save_scaler_state,
     save_scheduler_state,
 )
-from lerobot.policies import PreTrainedPolicy
+from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.processor import PolicyProcessorPipeline
 from lerobot.utils.constants import (
     CHECKPOINTS_DIR,
@@ -70,6 +71,11 @@ from lerobot.utils.constants import (
 from lerobot.utils.hub import find_latest_hub_checkpoint
 from lerobot.utils.io_utils import load_json, write_json
 from lerobot.utils.random_utils import load_rng_state, save_rng_state
+
+
+def _is_hub_offline_mode() -> bool:
+    """Compatibility shim for hub offline mode across huggingface_hub versions."""
+    return bool(getattr(hf_hub_constants, "HF_HUB_OFFLINE", False))
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
@@ -768,7 +774,7 @@ def _hub_parent(model_cfg: PreTrainedConfig | RewardModelConfig) -> tuple[str | 
     invalid `base_model`.
     """
     pretrained_path = model_cfg.pretrained_path
-    if pretrained_path is None or os.path.isdir(pretrained_path) or is_offline_mode():
+    if pretrained_path is None or os.path.isdir(pretrained_path) or _is_hub_offline_mode():
         return None, None
     try:
         info = model_info(str(pretrained_path))
