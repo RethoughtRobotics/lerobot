@@ -70,7 +70,9 @@ class VitaPolicy(PreTrainedPolicy):
 
     def reset(self):
         """Clear observation and action queues. Call on `env.reset()`."""
-        self._queues = {key: deque(maxlen=self.config.n_obs_steps) for key in self._obs_keys}
+        # With obs_stride > 1 the queue holds every frame in the history window; every obs_stride-th is used.
+        history = (self.config.n_obs_steps - 1) * self.config.obs_stride + 1
+        self._queues = {key: deque(maxlen=history) for key in self._obs_keys}
         self._queues[ACTION] = deque(maxlen=self.config.n_action_steps)
 
     @property
@@ -94,7 +96,8 @@ class VitaPolicy(PreTrainedPolicy):
         Uses the observation queues when populated by `select_action`, else the batch directly.
         """
         if any(len(self._queues[k]) > 0 for k in self._obs_keys):
-            batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in self._obs_keys}
+            stride = self.config.obs_stride
+            batch = {k: torch.stack(list(self._queues[k])[::stride], dim=1) for k in self._obs_keys}
         batch = self._with_time_dim(batch)
         actions = self.vita.generate_actions(batch)  # (B, horizon, action_dim)
         start = self.config.n_obs_steps - 1

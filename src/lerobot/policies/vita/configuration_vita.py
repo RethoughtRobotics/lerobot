@@ -36,6 +36,9 @@ class VitaConfig(PreTrainedConfig):
 
     # Inputs / outputs
     n_obs_steps: int = 1  # upstream `obs_horizon`
+    # Frames between consecutive observation steps: with n_obs_steps=2 and obs_stride=25 at 25 fps the
+    # policy sees frames t-25 and t. 1 (default, upstream) gives consecutive frames.
+    obs_stride: int = 1
     horizon: int = 16  # upstream `pred_horizon`: action steps predicted per chunk
     n_action_steps: int = 8  # upstream `action_horizon`: steps executed per policy call
 
@@ -104,6 +107,8 @@ class VitaConfig(PreTrainedConfig):
             raise ValueError(f"`flow_matcher` must be 'exact' or 'conditional'. Got {self.flow_matcher}.")
         if self.recon_loss_type not in ("l1", "l2"):
             raise ValueError(f"`recon_loss_type` must be 'l1' or 'l2'. Got {self.recon_loss_type}.")
+        if self.obs_stride < 1:
+            raise ValueError(f"`obs_stride` must be >= 1. Got {self.obs_stride}.")
         if self.n_action_steps > self.horizon - self.n_obs_steps + 1:
             raise ValueError(
                 f"`n_action_steps` ({self.n_action_steps}) must be <= horizon - n_obs_steps + 1 "
@@ -141,7 +146,7 @@ class VitaConfig(PreTrainedConfig):
 
     @property
     def observation_delta_indices(self) -> list:
-        return list(range(1 - self.n_obs_steps, 1))
+        return [-k * self.obs_stride for k in range(self.n_obs_steps - 1, -1, -1)]
 
     @property
     def action_delta_indices(self) -> list:

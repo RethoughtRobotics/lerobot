@@ -217,6 +217,40 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | StreamingLeRobotD
     return dataset
 
 
+def _make_separate_eval_dataset(cfg: TrainPipelineConfig, train_dataset: LeRobotDataset) -> LeRobotDataset:
+    """Every episode of dataset.eval_repo_id, loaded like the training set but without augmentation."""
+    eval_dataset = LeRobotDataset(
+        cfg.dataset.eval_repo_id,
+        delta_timestamps=resolve_delta_timestamps(cfg.trainable_config, train_dataset.meta, cfg.rename_map),
+        image_transforms=None,
+        depth_output_unit=cfg.dataset.depth_output_unit,
+        revision=cfg.dataset.eval_revision,
+        video_backend=cfg.dataset.video_backend,
+        return_uint8=True,
+        tolerance_s=cfg.tolerance_s,
+        video_decoder_cache_size=cfg.dataset.video_decoder_cache_size,
+    )
+    train_meta, eval_meta = train_dataset.meta, eval_dataset.meta
+    if eval_meta.fps != train_meta.fps:
+        raise ValueError(f"eval dataset fps {eval_meta.fps} differs from the training set's {train_meta.fps}")
+    shapes = {k: tuple(v["shape"]) for k, v in train_meta.features.items()}
+    eval_shapes = {k: tuple(v["shape"]) for k, v in eval_meta.features.items()}
+    if shapes != eval_shapes:
+        raise ValueError(f"eval dataset features {eval_shapes} differ from the training set's {shapes}")
+    logger.info(
+        f"Eval on {cfg.dataset.eval_repo_id}: all {eval_dataset.num_episodes} episodes "
+        f"({eval_dataset.num_frames} frames); training on all {train_dataset.num_episodes} of {cfg.dataset.repo_id}"
+    )
+    if cfg.dataset.use_imagenet_stats:
+        for key in eval_meta.camera_keys:
+            if key in eval_meta.depth_keys:
+                continue
+            eval_meta.stats.setdefault(key, {})
+            for stats_type, stats in IMAGENET_STATS.items():
+                eval_meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
+    return eval_dataset
+
+
 def make_train_eval_datasets(
     cfg: TrainPipelineConfig,
 ) -> tuple[LeRobotDataset | StreamingLeRobotDataset, LeRobotDataset | None]:
@@ -224,9 +258,13 @@ def make_train_eval_datasets(
 
     The last ceil(n_episodes * eval_split) episodes per task are held out for evaluation, but a
     task's only episode is never held out. If eval_split == 0.0, or no task has two or more
-    episodes, returns (full_dataset, None).
+    episodes, returns (full_dataset, None). With dataset.eval_repo_id set, nothing is split off:
+    returns (full_dataset, every episode of eval_repo_id).
     """
     full_dataset = make_dataset(cfg)
+
+    if cfg.dataset.eval_repo_id is not None:
+        return full_dataset, _make_separate_eval_dataset(cfg, full_dataset)
 
     eval_split = cfg.dataset.eval_split or 0.0
     if eval_split == 0.0:

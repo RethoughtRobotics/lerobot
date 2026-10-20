@@ -144,7 +144,8 @@ class TrainPipelineConfig(HubMixin):
     env_eval_freq: int = 20_000
     log_freq: int = 200
     # Compute eval loss on held-out episodes every N steps and at the last step (0 = disabled).
-    # Requires eval_split > 0. None (default) resolves to 2000, or to 0 when there is no held-out split.
+    # Requires eval_split > 0 or eval_repo_id. None (default) resolves to 2000, or to 0 when there is no
+    # held-out data.
     eval_steps: int | None = None
     # Cap on total eval samples, split uniformly across tasks (0 = use all held-out data).
     max_eval_samples: int = 2048
@@ -312,10 +313,13 @@ class TrainPipelineConfig(HubMixin):
             self.optimizer = active_cfg.get_optimizer_preset()
             self.scheduler = active_cfg.get_scheduler_preset()
 
+        has_eval_data = self.dataset.eval_split > 0.0 or self.dataset.eval_repo_id is not None
         if self.eval_steps is None:
-            self.eval_steps = 2000 if self.dataset.eval_split else 0
-        if self.eval_steps > 0 and self.dataset.eval_split == 0.0:
-            raise ValueError("eval_steps > 0 requires dataset.eval_split > 0.0 to hold out eval data.")
+            self.eval_steps = 2000 if has_eval_data else 0
+        if self.eval_steps > 0 and not has_eval_data:
+            raise ValueError(
+                "eval_steps > 0 requires dataset.eval_split > 0.0 or dataset.eval_repo_id to hold out eval data."
+            )
 
         # Remote runs auto-generate the repo_id in submit_to_hf (the policy may only be
         # resolved here, from --policy.path), so don't demand it up front for them.

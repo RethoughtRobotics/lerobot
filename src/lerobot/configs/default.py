@@ -73,12 +73,22 @@ class DatasetConfig:
     # Map-style: only for non-default storage formats (e.g. lance), per DataLoader worker.
     video_decoder_cache_size: int | None = None
     # Fraction of episodes held out per task for offline evaluation (0.0 = disabled).
-    # None (default) resolves to 0.1, or to 0.0 for streaming datasets, which cannot be split.
+    # None (default) resolves to 0.1, or to 0.0 for streaming datasets, which cannot be split, or when
+    # eval_repo_id is set.
     eval_split: float | None = None
+    # A separate dataset to compute eval loss on, instead of splitting episodes off `repo_id`: every
+    # episode of `repo_id` is trained on and every episode of this one is evaluated. Its features and fps
+    # must match `repo_id`.
+    eval_repo_id: str | None = None
+    eval_revision: str | None = None
 
     def __post_init__(self) -> None:
         if self.eval_split is None:
-            self.eval_split = 0.0 if self.streaming else 0.1
+            self.eval_split = 0.0 if self.streaming or self.eval_repo_id else 0.1
+        if self.eval_repo_id is not None and self.eval_split != 0.0:
+            raise ValueError("Set either dataset.eval_repo_id or dataset.eval_split, not both.")
+        if self.eval_repo_id is not None and self.streaming:
+            raise ValueError("dataset.eval_repo_id is not supported with dataset.streaming=true.")
         if self.repo_type not in ("dataset", "bucket"):
             raise ValueError(f"repo_type must be 'dataset' or 'bucket', got {self.repo_type!r}")
         if self.eval_split != 0.0 and self.streaming:
