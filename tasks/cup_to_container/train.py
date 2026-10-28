@@ -7,6 +7,12 @@ Implements the spec in the CupToContainer training spec document:
   - Episode-based train/val split (hold out episodes 4,14,24,34,44)
   - Normalization stats computed from training split only
 
+Fine-tuning a trained policy on corrections (--init_from, --lora_rank, --corrections_repo_id): the
+checkpoint's own config and normalization stats are kept, so the transforms and normalization are the
+ones it was trained with; LoRA (PEFT) on the Multi-Task DiT's denoiser attention and MLP layers is all
+that trains; the correction episodes are sampled --corrections_weight times as often as the
+demonstrations, which stay in the mix so the policy keeps what it could already do.
+
 Usage (via shell wrappers train_act_cup.sh / train_smolvla_cup.sh):
     uv run python cup_to_container/train.py \\
         --policy_type act \\
@@ -41,6 +47,10 @@ from lerobot.utils.random_utils import set_seed
 
 from compute_stats import compute_stats
 from wrapped_dataset import CupToContainerDataset, HELD_OUT_EPISODES, TRAIN_EPISODES
+
+# The Multi-Task DiT's denoiser layers LoRA adapts: each transformer block's attention projections and
+# MLP (RethoughtAI inference.lora.DIT_TARGETS), as a PEFT target regex over the policy's module names.
+DIT_LORA_TARGETS = r".*noise_predictor\.transformer_blocks\.\d+\.(attn\.(qkv_proj|out_proj)|mlp\.(0|2))"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", force=True)
 logger = logging.getLogger(__name__)
@@ -148,6 +158,52 @@ def build_policy_config(policy_type: str, chunk_size: int):
         raise ValueError(f"Unknown policy_type: {policy_type}")
 
 
+class CorrectionFrames(torch.utils.data.Dataset):
+    """Frames of another recording made to look like the training dataset's: each camera resized
+    (aspect not kept, as the training frames were made from the cameras) to the training dataset's
+    shape, and only the keys a training frame has, so the two can share a batch."""
+
+    def __init__(self, dataset, image_shapes: dict, keys: set):
+        self.dataset, self.image_shapes, self.keys = dataset, image_shapes, keys
+        self.meta = dataset.meta
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int) -> dict:
+        from torch.nn import functional as F
+
+        sample = {k: v for k, v in self.dataset[idx].items() if k in self.keys}
+        for k, (h, w) in self.image_shapes.items():
+            x = sample[k]
+            if tuple(x.shape[-2:]) == (h, w):
+                continue
+            flat = x.reshape(-1, *x.shape[-3:]).float()
+            flat = F.interpolate(flat, size=(h, w), mode="bilinear", antialias=True, align_corners=False)
+            if x.dtype == torch.uint8:
+                flat = flat.round().clamp(0, 255).to(torch.uint8)
+            sample[k] = flat.reshape(*x.shape[:-2], h, w)
+        return sample
+
+
+class MixedSampler(torch.utils.data.Sampler):
+    """The training frames once and the correction frames `weight` times per pass, shuffled anew each
+    pass. `extra` indexes the concatenated dataset (already offset past the training frames)."""
+
+    def __init__(self, base: list[int], extra: list[int], weight: int, seed: int = 42):
+        self.indices = list(base) + list(extra) * weight
+        self.seed, self.epoch = seed, 0
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __iter__(self):
+        g = torch.Generator().manual_seed(self.seed + self.epoch)
+        self.epoch += 1
+        for i in torch.randperm(len(self.indices), generator=g).tolist():
+            yield self.indices[i]
+
+
 def load_or_compute_stats(stats_path: Path, repo_id: str, dataset_dir: Path | None, video_backend: str,
                           chunk_size: int, action_start: int = 0) -> dict:
     if stats_path.exists():
@@ -193,12 +249,25 @@ def build_optimizer(policy_type: str, policy: torch.nn.Module, steps: int):
         return optimizer, scheduler
 
 
-def save_ckpt(policy, optimizer, scheduler, step: int, output_dir: Path, stats: dict) -> None:
+def save_ckpt(policy, optimizer, scheduler, step: int, output_dir: Path, stats: dict, plain=None) -> None:
     ckpt_dir = output_dir / "checkpoints" / f"{step:06d}"
     model_dir = ckpt_dir / "pretrained_model"
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    policy.save_pretrained(model_dir)
+    if plain is not None:
+        # The adapter alone, and the base with it merged in (saved through `plain`, an unwrapped copy
+        # of the policy), which loads like any checkpoint.
+        policy.save_pretrained(ckpt_dir / "lora_adapter")
+        with torch.no_grad():
+            policy.merge_adapter()
+            # Copies: state_dict holds views of the parameters, which unmerge_adapter restores.
+            merged = {k.replace(".base_layer", ""): v.detach().clone()
+                      for k, v in policy.get_base_model().state_dict().items() if "lora_" not in k}
+            policy.unmerge_adapter()
+        plain.load_state_dict(merged)
+        plain.save_pretrained(model_dir)
+    else:
+        policy.save_pretrained(model_dir)
 
     # Save stats alongside the model so inference can reconstruct normalization
     with open(model_dir / "normalization_stats.json", "w") as f:
@@ -251,16 +320,28 @@ def train(args):
 
     # ── stats ─────────────────────────────────────────────────────────────────
     dataset_dir = Path(args.dataset_dir) if args.dataset_dir else None
-    chunk_size = args.chunk_size or DEFAULT_CHUNK_SIZE[args.policy_type]
-    policy_cfg = build_policy_config(args.policy_type, chunk_size)
-    action_offsets = list(policy_cfg.action_delta_indices)
-    # TCP-relative action stats depend on the horizon (later steps drift further from the
-    # current pose) and on where the window starts, so the cache is keyed by both.
-    start_tag = f"_start{action_offsets[0]}" if action_offsets[0] != 0 else ""
-    stats_path = (Path(__file__).parent /
-                  f"stats_{args.dataset_repo_id.split('/')[-1]}_chunk{chunk_size}{start_tag}.json")
-    stats_json = load_or_compute_stats(stats_path, args.dataset_repo_id, dataset_dir, args.video_backend,
-                                       chunk_size, action_offsets[0])
+    if args.init_from:
+        # The checkpoint's own config and stats: new stats would shift what its inputs mean.
+        from lerobot.configs.policies import PreTrainedConfig
+
+        policy_cfg = PreTrainedConfig.from_pretrained(args.init_from)
+        if policy_cfg.type != args.policy_type:
+            raise SystemExit(f"--init_from is a {policy_cfg.type} checkpoint, not {args.policy_type}")
+        policy_cfg.pretrained_path = Path(args.init_from)
+        with open(Path(args.init_from) / "normalization_stats.json") as f:
+            stats_json = json.load(f)
+        action_offsets = list(policy_cfg.action_delta_indices)
+    else:
+        chunk_size = args.chunk_size or DEFAULT_CHUNK_SIZE[args.policy_type]
+        policy_cfg = build_policy_config(args.policy_type, chunk_size)
+        action_offsets = list(policy_cfg.action_delta_indices)
+        # TCP-relative action stats depend on the horizon (later steps drift further from the
+        # current pose) and on where the window starts, so the cache is keyed by both.
+        start_tag = f"_start{action_offsets[0]}" if action_offsets[0] != 0 else ""
+        stats_path = (Path(__file__).parent /
+                      f"stats_{args.dataset_repo_id.split('/')[-1]}_chunk{chunk_size}{start_tag}.json")
+        stats_json = load_or_compute_stats(stats_path, args.dataset_repo_id, dataset_dir, args.video_backend,
+                                           chunk_size, action_offsets[0])
     tensor_stats = _json_stats_to_tensors(stats_json, device)
 
     # ── dataset ───────────────────────────────────────────────────────────────
@@ -286,10 +367,44 @@ def train(args):
     logger.info(f"Cameras: {train_dataset.meta.camera_keys}")
     logger.info(f"Training frames: {len(train_dataset)}")
 
+    corrections = None
+    if args.corrections_repo_id:
+        corr_meta = LeRobotDatasetMetadata(args.corrections_repo_id, root=args.corrections_dir)
+        corr_val_episodes = (args.corrections_val_episodes if args.corrections_val_episodes is not None
+                             else [corr_meta.total_episodes - 1])
+        corr_train_episodes = [e for e in range(corr_meta.total_episodes) if e not in corr_val_episodes]
+        image_shapes = {k: tuple(train_dataset.meta.features[k]["shape"][:2]) for k in train_dataset.meta.camera_keys}
+        keys = set(train_dataset[0].keys())
+
+        def correction_set(episodes):
+            base = LeRobotDataset(repo_id=args.corrections_repo_id, root=args.corrections_dir,
+                                  delta_timestamps=delta_timestamps, episodes=episodes,
+                                  video_backend=args.video_backend, return_uint8=True)
+            frames = CorrectionFrames(CupToContainerDataset(base, stats_json, cameras=args.cameras), image_shapes, keys)
+            return base, frames
+
+        corr_base, corr_frames = correction_set(corr_train_episodes)
+        corrections = (corr_base, corr_train_episodes)
+        logger.info(f"Correction frames: {len(corr_frames)} (episodes {corr_train_episodes}, "
+                    f"sampled {args.corrections_weight}x), validation episodes {corr_val_episodes}")
+        train_set = torch.utils.data.ConcatDataset([train_dataset, corr_frames])
+    else:
+        train_set = train_dataset
+
     # ── policy ────────────────────────────────────────────────────────────────
     logger.info(f"Creating {args.policy_type} policy")
     policy = make_policy(cfg=policy_cfg, ds_meta=train_dataset.meta)
     policy = policy.to(device)
+    plain = None
+    if args.lora_rank:
+        if args.policy_type != "multi_task_dit" or args.ema_power is not None:
+            raise SystemExit("--lora_rank: Multi-Task DiT only, without --ema_power")
+        from peft import LoraConfig, get_peft_model
+
+        plain = make_policy(cfg=policy_cfg, ds_meta=train_dataset.meta).cpu()
+        policy.requires_grad_(False)
+        policy = get_peft_model(policy, LoraConfig(r=args.lora_rank, lora_alpha=args.lora_alpha or args.lora_rank,
+                                                   target_modules=DIT_LORA_TARGETS, lora_dropout=0.0, bias="none"))
 
     n_learn = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     n_total = sum(p.numel() for p in policy.parameters())
@@ -302,7 +417,13 @@ def train(args):
     )
 
     # ── optimizer ─────────────────────────────────────────────────────────────
-    optimizer, scheduler = build_optimizer(args.policy_type, policy, args.steps)
+    if args.lora_rank:
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+
+        optimizer = torch.optim.AdamW([p for p in policy.parameters() if p.requires_grad], lr=args.lr, weight_decay=0.0)
+        scheduler = CosineAnnealingLR(optimizer, T_max=args.steps, eta_min=args.lr * 0.1)
+    else:
+        optimizer, scheduler = build_optimizer(args.policy_type, policy, args.steps)
 
     # ── sampler & dataloader ──────────────────────────────────────────────────
     ep_meta = base_train.meta.episodes
@@ -316,9 +437,20 @@ def train(args):
         # Episode-filtered datasets are indexed relatively (0..len-1), not by absolute frame index.
         absolute_to_relative_idx=base_train.absolute_to_relative_idx,
     )
+    if corrections is not None:
+        corr_base, corr_train_episodes = corrections
+        corr_sampler = EpisodeAwareSampler(
+            corr_base.meta.episodes["dataset_from_index"],
+            corr_base.meta.episodes["dataset_to_index"],
+            episode_indices_to_use=corr_train_episodes,
+            drop_n_last_frames=getattr(policy_cfg, "drop_n_last_frames", 0),
+            absolute_to_relative_idx=corr_base.absolute_to_relative_idx,
+        )
+        sampler = MixedSampler(sampler.indices, [len(train_dataset) + i for i in corr_sampler.indices],
+                               args.corrections_weight)
     collate_fn = lerobot_collate_fn if train_dataset.meta.has_language_columns else None
     dataloader = torch.utils.data.DataLoader(
-        train_dataset,
+        train_set,
         batch_size=args.batch_size,
         sampler=sampler,
         num_workers=args.num_workers,
@@ -351,6 +483,14 @@ def train(args):
             drop_last=False,
             collate_fn=collate_fn,
             persistent_workers=val_workers > 0,
+        )
+    corr_val_dataloader = None
+    if args.val_freq > 0 and corrections is not None and corr_val_episodes:
+        _, corr_val = correction_set(corr_val_episodes)
+        logger.info(f"Correction validation frames: {len(corr_val)} (episodes {corr_val_episodes})")
+        corr_val_dataloader = torch.utils.data.DataLoader(
+            corr_val, batch_size=args.batch_size, shuffle=False, num_workers=min(4, args.num_workers),
+            pin_memory=device.type == "cuda", drop_last=False, collate_fn=collate_fn,
         )
 
     # ── WandB ─────────────────────────────────────────────────────────────────
@@ -444,12 +584,17 @@ def train(args):
             logger.info(f"step {step:6d}/{args.steps}  val_loss={val_metrics['loss']:.4f}")
             if use_wandb:
                 wandb.log({f"val/{k}": v for k, v in val_metrics.items()}, step=step)
+            if corr_val_dataloader is not None:
+                corr_metrics = evaluate(model, policy, corr_val_dataloader, preprocessor, device, use_autocast)
+                logger.info(f"step {step:6d}/{args.steps}  val_corrections_loss={corr_metrics['loss']:.4f}")
+                if use_wandb:
+                    wandb.log({f"val_corrections/{k}": v for k, v in corr_metrics.items()}, step=step)
 
         if step % args.save_freq == 0 or step == args.steps:
             if ema is not None:
                 ema.store(policy.parameters())
                 ema.copy_to(policy.parameters())
-            save_ckpt(policy, optimizer, scheduler, step, output_dir, stats_json)
+            save_ckpt(policy, optimizer, scheduler, step, output_dir, stats_json, plain)
             if ema is not None:
                 ema.restore(policy.parameters())
 
@@ -500,6 +645,19 @@ def parse_args():
     p.add_argument("--hub_repo_id", type=str, default=None)
     p.add_argument("--wandb_project", type=str, default=None)
     p.add_argument("--wandb_entity", type=str, default=None)
+    p.add_argument("--init_from", default=None,
+                   help="A trained checkpoint (pretrained_model dir) to fine-tune: its config and stats are kept")
+    p.add_argument("--lora_rank", type=int, default=0,
+                   help="Train only LoRA of this rank on the Multi-Task DiT's denoiser (0: off)")
+    p.add_argument("--lora_alpha", type=float, default=None, help="LoRA alpha (default: the rank)")
+    p.add_argument("--lr", type=float, default=1e-4, help="Learning rate with --lora_rank")
+    p.add_argument("--corrections_repo_id", default=None,
+                   help="Correction episodes recorded on the robot, trained beside the dataset")
+    p.add_argument("--corrections_dir", default=None, help="Local root of the corrections dataset")
+    p.add_argument("--corrections_weight", type=int, default=1,
+                   help="How many times each correction frame is sampled per pass over the demonstrations")
+    p.add_argument("--corrections_val_episodes", type=int, nargs="*", default=None,
+                   help="Correction episodes held out for validation (default: the last one)")
     return p.parse_args()
 
 
