@@ -161,10 +161,12 @@ def build_policy_config(policy_type: str, chunk_size: int):
 class CorrectionFrames(torch.utils.data.Dataset):
     """Frames of another recording made to look like the training dataset's: each camera resized
     (aspect not kept, as the training frames were made from the cameras) to the training dataset's
-    shape, and only the keys a training frame has, so the two can share a batch."""
+    shape, and the features the training dataset lacks (and their padding flags) dropped, so the two
+    can share a batch."""
 
-    def __init__(self, dataset, image_shapes: dict, keys: set):
-        self.dataset, self.image_shapes, self.keys = dataset, image_shapes, keys
+    def __init__(self, dataset, image_shapes: dict, extra: set):
+        self.dataset, self.image_shapes = dataset, image_shapes
+        self.drop = set(extra) | {f"{k}_is_pad" for k in extra}
         self.meta = dataset.meta
 
     def __len__(self) -> int:
@@ -173,7 +175,7 @@ class CorrectionFrames(torch.utils.data.Dataset):
     def __getitem__(self, idx: int) -> dict:
         from torch.nn import functional as F
 
-        sample = {k: v for k, v in self.dataset[idx].items() if k in self.keys}
+        sample = {k: v for k, v in self.dataset[idx].items() if k not in self.drop}
         for k, (h, w) in self.image_shapes.items():
             x = sample[k]
             if tuple(x.shape[-2:]) == (h, w):
@@ -374,13 +376,15 @@ def train(args):
                              else [corr_meta.total_episodes - 1])
         corr_train_episodes = [e for e in range(corr_meta.total_episodes) if e not in corr_val_episodes]
         image_shapes = {k: tuple(train_dataset.meta.features[k]["shape"][:2]) for k in train_dataset.meta.camera_keys}
-        keys = set(train_dataset[0].keys())
+        # From the metadata: decoding a frame here would leave video decoders in this process that the
+        # forked DataLoader workers inherit and corrupt each other through.
+        extra = set(corr_meta.features) - set(base_train.meta.features)
 
         def correction_set(episodes):
             base = LeRobotDataset(repo_id=args.corrections_repo_id, root=args.corrections_dir,
                                   delta_timestamps=delta_timestamps, episodes=episodes,
                                   video_backend=args.video_backend, return_uint8=True)
-            frames = CorrectionFrames(CupToContainerDataset(base, stats_json, cameras=args.cameras), image_shapes, keys)
+            frames = CorrectionFrames(CupToContainerDataset(base, stats_json, cameras=args.cameras), image_shapes, extra)
             return base, frames
 
         corr_base, corr_frames = correction_set(corr_train_episodes)
