@@ -725,3 +725,51 @@ def test_missing_vision_tokens_raise(n_values: int):
     conditioning = torch.cat([conditioning, torch.zeros(2, n_values)], dim=-1)
     with pytest.raises(ValueError, match="vision_cross_attention"):
         policy.noise_predictor(x, t, conditioning_vec=conditioning)
+
+
+def test_cached_keys_and_values_give_the_uncached_result():
+    """Reusing keys and values within a plan changes nothing; a new plan or training recomputes them."""
+    policy = _opened_policy()
+    denoiser = policy.noise_predictor
+    x, t, conditioning = _denoiser_inputs(policy, n_tokens=5)
+    with torch.enable_grad():
+        uncached = denoiser(x, t, conditioning_vec=conditioning).detach()
+    assert denoiser._kv_cache is None
+
+    with torch.no_grad():
+        first = denoiser(x, t, conditioning_vec=conditioning)
+        kv = denoiser._kv_cache
+        second = denoiser(x, t, conditioning_vec=conditioning)
+        assert denoiser._kv_cache is kv
+        denoiser(x, t, conditioning_vec=conditioning.clone())
+        assert denoiser._kv_cache is not kv
+    assert torch.equal(first, uncached)
+    assert torch.equal(second, uncached)
+
+
+def test_cached_keys_and_values_never_reach_training():
+    """Gradients must reach the key and value projections, even right after sampling."""
+    policy = _opened_policy()
+    denoiser = policy.noise_predictor
+    x, t, conditioning = _denoiser_inputs(policy, n_tokens=5)
+    with torch.no_grad():
+        denoiser(x, t, conditioning_vec=conditioning)
+    denoiser(x, t, conditioning_vec=conditioning).sum().backward()
+    assert denoiser.transformer_blocks[0].cross_attn.kv_proj.weight.grad.abs().sum() > 0
+
+
+def test_cross_attention_sample_and_train_through_the_policy():
+    """A full training step and plan, with the preprocessing the policy normally gets."""
+    config = create_config(vision_cross_attention=True, vision_token_layer=-2, num_inference_steps=2)
+    policy = MultiTaskDiTPolicy(config=config).to(config.device)
+    preprocessor, _ = make_multi_task_dit_pre_post_processors(config=config, dataset_stats=None)
+    batch = preprocessor(create_train_batch())
+
+    loss, _ = policy.forward(batch)
+    loss.backward()
+    assert policy.noise_predictor.transformer_blocks[0].cross_attn.out_proj.weight.grad.abs().sum() > 0
+
+    policy.eval()
+    observation = preprocessor(create_observation_batch())
+    with torch.no_grad():
+        assert policy.select_action(observation).shape == (2, 10)

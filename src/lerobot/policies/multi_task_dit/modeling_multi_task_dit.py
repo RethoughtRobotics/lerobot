@@ -691,6 +691,7 @@ class DiffusionTransformer(nn.Module):
         self.dropout = config.dropout
         self.use_rope = config.use_rope
         self.vision_cross_attention = config.vision_cross_attention
+        self._kv_conditioning = self._kv_cache = None
 
         self.timestep_embed_dim = config.timestep_embed_dim
         self.time_mlp = nn.Sequential(
@@ -736,7 +737,14 @@ class DiffusionTransformer(nn.Module):
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
     def _vision_keys_values(self, conditioning_vec: Tensor) -> list[tuple[Tensor, Tensor]]:
-        """Each block's keys and values of the vision tokens that follow the conditioning vector."""
+        """Each block's keys and values of the vision tokens that follow the conditioning vector.
+
+        Only the action queries change between the denoising steps of a plan, and projecting the
+        tokens costs far more than the attention itself (about hidden_size / horizon times), so outside
+        training the steps of a plan, which share one conditioning tensor, share these too.
+        """
+        if not torch.is_grad_enabled() and conditioning_vec is self._kv_conditioning:
+            return self._kv_cache
         tokens = conditioning_vec[:, self.conditioning_dim :]
         n_tokens, remainder = divmod(tokens.shape[1], self.hidden_size)
         if n_tokens == 0 or remainder:
@@ -745,7 +753,10 @@ class DiffusionTransformer(nn.Module):
                 f"conditioning vector, got {conditioning_vec.shape[1]} values in all."
             )
         tokens = tokens.reshape(len(tokens), n_tokens, self.hidden_size)
-        return [block.cross_attn.keys_values(tokens) for block in self.transformer_blocks]
+        keys_values = [block.cross_attn.keys_values(tokens) for block in self.transformer_blocks]
+        cached = not torch.is_grad_enabled()
+        self._kv_conditioning, self._kv_cache = (conditioning_vec, keys_values) if cached else (None, None)
+        return keys_values
 
     def forward(self, x: Tensor, timestep: Tensor, conditioning_vec: Tensor) -> Tensor:
         _, seq_len, _ = x.shape
