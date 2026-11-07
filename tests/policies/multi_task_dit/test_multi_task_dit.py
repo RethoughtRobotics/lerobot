@@ -667,3 +667,61 @@ def test_vision_token_layers_train_at_the_policy_rate():
     assert id(encoder.vision_token_proj.weight) not in vision_group
     assert id(encoder.vision_step_embedding) not in vision_group
     assert id(encoder.vision_camera_embedding) not in vision_group
+
+
+def _denoiser_inputs(policy: MultiTaskDiTPolicy, n_tokens: int = 0) -> tuple[Tensor, Tensor, Tensor]:
+    """Noisy actions, timesteps and a conditioning vector followed by `n_tokens` tokens, batch 2."""
+    config, denoiser = policy.config, policy.noise_predictor
+    x = torch.randn(2, config.horizon, config.action_feature.shape[0])
+    conditioning = torch.randn(2, denoiser.conditioning_dim + n_tokens * config.hidden_dim)
+    return x, torch.tensor([3, 40]), conditioning
+
+
+def _opened_policy() -> MultiTaskDiTPolicy:
+    """A patch policy with nonzero weights, as after training, so that the tokens change its output."""
+    policy = MultiTaskDiTPolicy(config=create_config(vision_cross_attention=True))
+    for block in policy.noise_predictor.transformer_blocks:
+        torch.nn.init.normal_(block.adaLN_modulation[-1].weight, std=0.02)
+        torch.nn.init.normal_(block.cross_attn.out_proj.weight, std=0.02)
+    return policy.eval()
+
+
+def test_cross_attention_is_silent_at_init():
+    """With shared weights, a new patch policy computes exactly what the CLS policy computes."""
+    base = MultiTaskDiTPolicy(config=create_config()).eval()
+    for block in base.noise_predictor.transformer_blocks:
+        torch.nn.init.normal_(block.adaLN_modulation[-1].weight, std=0.02)
+    patches = MultiTaskDiTPolicy(config=create_config(vision_cross_attention=True)).eval()
+    missing, unexpected = patches.load_state_dict(base.state_dict(), strict=False)
+    assert not unexpected
+    assert all("cross_attn" in k or "vision_" in k for k in missing)
+
+    x, t, conditioning = _denoiser_inputs(base)
+    tokens = torch.randn(2, 5 * base.config.hidden_dim)
+    with torch.no_grad():
+        plain = base.noise_predictor(x, t, conditioning_vec=conditioning)
+        with_tokens = patches.noise_predictor(
+            x, t, conditioning_vec=torch.cat([conditioning, tokens], dim=-1)
+        )
+    assert torch.equal(plain, with_tokens)
+
+
+def test_tokens_reach_the_plan_once_cross_attention_opens():
+    policy = _opened_policy()
+    x, t, conditioning = _denoiser_inputs(policy, n_tokens=5)
+    other = conditioning.clone()
+    other[:, policy.noise_predictor.conditioning_dim :] += 1.0
+    with torch.no_grad():
+        first = policy.noise_predictor(x, t, conditioning_vec=conditioning)
+        second = policy.noise_predictor(x, t, conditioning_vec=other)
+    assert not torch.allclose(first, second)
+
+
+@pytest.mark.parametrize("n_values", [0, 7])
+def test_missing_vision_tokens_raise(n_values: int):
+    """A caller that drops the tokens stops with a clear error instead of planning without them."""
+    policy = _opened_policy()
+    x, t, conditioning = _denoiser_inputs(policy)
+    conditioning = torch.cat([conditioning, torch.zeros(2, n_values)], dim=-1)
+    with pytest.raises(ValueError, match="vision_cross_attention"):
+        policy.noise_predictor(x, t, conditioning_vec=conditioning)

@@ -563,8 +563,51 @@ class RoPEAttention(nn.Module):
         return self.out_proj(attn_out)
 
 
+class VisionCrossAttention(nn.Module):
+    """Multi-head cross-attention from the action tokens to the vision tokens.
+
+    The output projection starts at zero, as AdaLN-Zero does for each block (Peebles and Xie, DiT, 2023),
+    so the layer adds nothing until training opens it.
+    """
+
+    def __init__(self, hidden_size: int, num_heads: int, dropout: float = 0.0):
+        super().__init__()
+        assert hidden_size % num_heads == 0, "hidden_size must be divisible by num_heads"
+
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.head_dim = hidden_size // num_heads
+        self.dropout = dropout
+
+        self.q_proj = nn.Linear(hidden_size, hidden_size, bias=True)
+        self.kv_proj = nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+        self.out_proj = nn.Linear(hidden_size, hidden_size, bias=True)
+        nn.init.constant_(self.out_proj.weight, 0)
+        nn.init.constant_(self.out_proj.bias, 0)
+
+    def keys_values(self, tokens: Tensor) -> tuple[Tensor, Tensor]:
+        """Keys and values (b, heads, tokens, head_dim) of the vision tokens (b, tokens, hidden_size)."""
+        b, n, _ = tokens.shape
+        keys, values = (
+            self.kv_proj(tokens).reshape(b, n, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        )
+        return keys, values
+
+    def forward(self, x: Tensor, keys: Tensor, values: Tensor) -> Tensor:
+        b, t, _ = x.shape
+        queries = self.q_proj(x).reshape(b, t, self.num_heads, self.head_dim).transpose(1, 2)
+        attn_out = F.scaled_dot_product_attention(
+            queries, keys, values, dropout_p=self.dropout if self.training else 0.0
+        )
+        return self.out_proj(attn_out.transpose(1, 2).reshape(b, t, self.hidden_size))
+
+
 class TransformerBlock(nn.Module):
-    """DiT-style transformer block with AdaLN-Zero."""
+    """DiT-style transformer block with AdaLN-Zero.
+
+    With `cross_attention`, an unmodulated cross-attention layer sits between self-attention and the MLP,
+    the block layout of PixArt-alpha (Chen et al., 2023).
+    """
 
     def __init__(
         self,
@@ -575,6 +618,7 @@ class TransformerBlock(nn.Module):
         use_rope: bool = False,
         max_seq_len: int = 512,
         rope_base: float = 10000.0,
+        cross_attention: bool = False,
     ):
         super().__init__()
         self.use_rope = use_rope
@@ -595,6 +639,10 @@ class TransformerBlock(nn.Module):
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
+        if cross_attention:
+            self.norm_cross = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+            self.cross_attn = VisionCrossAttention(hidden_size, num_heads, dropout)
+
         self.mlp = nn.Sequential(
             nn.Linear(hidden_size, hidden_size * 4),
             nn.GELU(approximate="tanh"),
@@ -603,7 +651,7 @@ class TransformerBlock(nn.Module):
 
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(num_features, 6 * hidden_size, bias=True))
 
-    def forward(self, x: Tensor, features: Tensor) -> Tensor:
+    def forward(self, x: Tensor, features: Tensor, vision_kv: tuple[Tensor, Tensor] | None = None) -> Tensor:
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(
             features
         ).chunk(6, dim=1)
@@ -616,6 +664,9 @@ class TransformerBlock(nn.Module):
             attn_out, _ = self.multihead_attn(attn_input, attn_input, attn_input)
 
         x = x + gate_msa.unsqueeze(1) * attn_out
+
+        if vision_kv is not None:
+            x = x + self.cross_attn(self.norm_cross(x), *vision_kv)
 
         mlp_input = modulate(self.norm2(x), shift_mlp.unsqueeze(1), scale_mlp.unsqueeze(1))
         mlp_out = self.mlp(mlp_input)
@@ -639,6 +690,7 @@ class DiffusionTransformer(nn.Module):
         self.num_heads = config.num_heads
         self.dropout = config.dropout
         self.use_rope = config.use_rope
+        self.vision_cross_attention = config.vision_cross_attention
 
         self.timestep_embed_dim = config.timestep_embed_dim
         self.time_mlp = nn.Sequential(
@@ -669,6 +721,7 @@ class DiffusionTransformer(nn.Module):
                     use_rope=self.use_rope,
                     max_seq_len=self.horizon,
                     rope_base=config.rope_base,
+                    cross_attention=self.vision_cross_attention,
                 )
                 for _ in range(self.num_layers)
             ]
@@ -682,8 +735,25 @@ class DiffusionTransformer(nn.Module):
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
+    def _vision_keys_values(self, conditioning_vec: Tensor) -> list[tuple[Tensor, Tensor]]:
+        """Each block's keys and values of the vision tokens that follow the conditioning vector."""
+        tokens = conditioning_vec[:, self.conditioning_dim :]
+        n_tokens, remainder = divmod(tokens.shape[1], self.hidden_size)
+        if n_tokens == 0 or remainder:
+            raise ValueError(
+                f"vision_cross_attention needs {self.hidden_size}-wide tokens after the {self.conditioning_dim}-D "
+                f"conditioning vector, got {conditioning_vec.shape[1]} values in all."
+            )
+        tokens = tokens.reshape(len(tokens), n_tokens, self.hidden_size)
+        return [block.cross_attn.keys_values(tokens) for block in self.transformer_blocks]
+
     def forward(self, x: Tensor, timestep: Tensor, conditioning_vec: Tensor) -> Tensor:
         _, seq_len, _ = x.shape
+
+        vision_kv = [None] * self.num_layers
+        if self.vision_cross_attention:
+            vision_kv = self._vision_keys_values(conditioning_vec)
+            conditioning_vec = conditioning_vec[:, : self.conditioning_dim]
 
         timestep_features = self.time_mlp(timestep)
         cond_features = torch.cat([timestep_features, conditioning_vec], dim=-1)
@@ -693,8 +763,8 @@ class DiffusionTransformer(nn.Module):
         if self.pos_embedding is not None:
             hidden_seq = hidden_seq + self.pos_embedding[:, :seq_len, :]
 
-        for block in self.transformer_blocks:
-            hidden_seq = block(hidden_seq, cond_features)
+        for block, kv in zip(self.transformer_blocks, vision_kv, strict=True):
+            hidden_seq = block(hidden_seq, cond_features, kv)
 
         return self.output_proj(hidden_seq)
 
