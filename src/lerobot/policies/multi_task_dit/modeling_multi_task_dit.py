@@ -301,6 +301,21 @@ class ObservationEncoder(nn.Module):
 
         self._setup_vector_output()
 
+        if config.vision_cross_attention:
+            if not config.image_features:
+                raise ValueError("vision_cross_attention requires image features.")
+            encoder = self.vision_encoder or next(iter(self.vision_encoders))
+            hidden = config.hidden_dim
+            self.vision_token_proj = nn.Linear(encoder.embed_dim, hidden)
+            # CLIP's own position embedding tells patches within an image apart. These tell apart what
+            # flattening would otherwise mix: which camera, and which observation step.
+            self.vision_step_embedding = nn.Parameter(
+                torch.empty(config.n_obs_steps, 1, 1, hidden).normal_(std=0.02)
+            )
+            self.vision_camera_embedding = nn.Parameter(
+                torch.empty(self.num_cameras, 1, hidden).normal_(std=0.02)
+            )
+
     def _apply_preprocessing(self, images: Tensor) -> Tensor:
         if self.do_resize:
             images = self.resize(images)
@@ -359,10 +374,16 @@ class ObservationEncoder(nn.Module):
 
         self.conditioning_dim = total_dim * self.config.n_obs_steps
 
+    def _vision_token_sequence(self, tokens: Tensor) -> Tensor:
+        """Project CLIP tokens (b, s, n, t, d) into one sequence (b, s*n*t, hidden_dim)."""
+        tokens = self.vision_token_proj(tokens) + self.vision_step_embedding + self.vision_camera_embedding
+        return tokens.flatten(start_dim=1, end_dim=3)
+
     def encode(self, batch: dict) -> Tensor:
-        """Encode observations to vector format."""
+        """Encode observations to vector format, followed by the vision tokens with vision_cross_attention."""
         batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
         conditioning_feats = []
+        vision_tokens = None
         token_layer = self.config.vision_token_layer if self.config.vision_cross_attention else None
 
         conditioning_feats.append(batch[OBS_STATE])
@@ -376,28 +397,44 @@ class ObservationEncoder(nn.Module):
             images = self._apply_camera_dropout(images)
 
             if self.config.use_separate_rgb_encoder_per_camera:
-                camera_features = []
+                camera_features, camera_tokens = [], []
                 for cam_idx in range(self.num_cameras):
                     cam_images = images[:, :, cam_idx]
                     cam_images_flat = einops.rearrange(cam_images, "b s c h w -> (b s) c h w")
                     cam_images_flat = self._apply_preprocessing(cam_images_flat)
-                    cam_features, _ = self.vision_encoders[cam_idx](cam_images_flat, token_layer)
+                    cam_features, cam_tokens = self.vision_encoders[cam_idx](cam_images_flat, token_layer)
                     cam_visual_features = cam_features.flatten(start_dim=1)
                     cam_features_reshaped = einops.rearrange(
                         cam_visual_features, "(b s) f -> b s f", b=batch_size, s=n_obs_steps
                     )
                     camera_features.append(cam_features_reshaped)
+                    if cam_tokens is not None:
+                        camera_tokens.append(
+                            einops.rearrange(cam_tokens, "(b s) t d -> b s t d", b=batch_size, s=n_obs_steps)
+                        )
                 img_features = torch.cat(camera_features, dim=-1)
+                if camera_tokens:
+                    vision_tokens = self._vision_token_sequence(torch.stack(camera_tokens, dim=2))
                 conditioning_feats.append(img_features)
             else:
                 images_flat = einops.rearrange(images, "b s n c h w -> (b s n) c h w")
                 images_flat = self._apply_preprocessing(images_flat)
-                visual_features, _ = self.vision_encoder(images_flat, token_layer)
+                visual_features, tokens = self.vision_encoder(images_flat, token_layer)
                 visual_features = visual_features.flatten(start_dim=1)
                 img_features = einops.rearrange(
                     visual_features, "(b s n) f -> b s (n f)", b=batch_size, s=n_obs_steps, n=self.num_cameras
                 )
                 conditioning_feats.append(img_features)
+                if tokens is not None:
+                    vision_tokens = self._vision_token_sequence(
+                        einops.rearrange(
+                            tokens,
+                            "(b s n) t d -> b s n t d",
+                            b=batch_size,
+                            s=n_obs_steps,
+                            n=self.num_cameras,
+                        )
+                    )
 
         if self.text_encoder is not None and OBS_LANGUAGE_TOKENS in batch:
             input_ids = batch[OBS_LANGUAGE_TOKENS]  # [batch_size, seq_length]
@@ -408,8 +445,12 @@ class ObservationEncoder(nn.Module):
             text_features = text_features.unsqueeze(1).expand(-1, n_obs_steps, -1)
             conditioning_feats.append(text_features)
 
-        combined_features = torch.cat(conditioning_feats, dim=-1)
-        return combined_features.flatten(start_dim=1)
+        combined_features = torch.cat(conditioning_feats, dim=-1).flatten(start_dim=1)
+        if vision_tokens is not None:
+            # Flattened onto the vector, the tokens follow every caller's slicing, repeating and
+            # batching of the conditioning; the denoiser splits them off again.
+            combined_features = torch.cat([combined_features, vision_tokens.flatten(start_dim=1)], dim=-1)
+        return combined_features
 
 
 # -- Transformer Components --

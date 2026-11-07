@@ -95,6 +95,7 @@ def create_config(
     with_visual: bool = True,
     height: int = 224,
     width: int = 224,
+    **overrides,
 ) -> MultiTaskDiTConfig:
     """Create a MultiTaskDiT config for testing.
 
@@ -107,6 +108,7 @@ def create_config(
         with_visual: Whether to include visual input (default: True)
         height: Image height (only used if with_visual=True)
         width: Image width (only used if with_visual=True)
+        overrides: Further MultiTaskDiTConfig fields
     """
     input_features = {OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(state_dim,))}
 
@@ -125,6 +127,7 @@ def create_config(
         hidden_dim=128,
         num_layers=2,
         num_heads=4,
+        **overrides,
     )
 
     config.validate_features()
@@ -640,3 +643,27 @@ def test_clip_vision_encoder_tokens():
 def test_vision_token_layer_counts_from_the_end():
     with pytest.raises(ValueError, match="vision_token_layer"):
         MultiTaskDiTConfig(vision_token_layer=0)
+
+
+@pytest.mark.parametrize("separate_encoders", [False, True])
+def test_vision_tokens_follow_the_conditioning_vector(separate_encoders: bool):
+    """197 tokens for each camera and observation step, after the unchanged vector: 788 with two cameras."""
+    config = create_config(vision_cross_attention=True, use_separate_rgb_encoder_per_camera=separate_encoders)
+    config.input_features[f"{OBS_IMAGES}.wrist"] = PolicyFeature(type=FeatureType.VISUAL, shape=(3, 224, 224))
+    policy = MultiTaskDiTPolicy(config=config).eval()
+    batch = {OBS_STATE: torch.rand(3, 2, 10), OBS_IMAGES: torch.rand(3, 2, 2, 3, 224, 224)}
+    with torch.no_grad():
+        conditioning = policy.observation_encoder.encode(batch)
+
+    vector_dim = (10 + 2 * 768) * 2
+    assert conditioning.shape == (3, vector_dim + 788 * config.hidden_dim)
+
+
+def test_vision_token_layers_train_at_the_policy_rate():
+    """Only CLIP's own weights take the vision encoder's reduced learning rate."""
+    policy = MultiTaskDiTPolicy(config=create_config(vision_cross_attention=True))
+    vision_group = {id(p) for p in policy.get_optim_params()[1]["params"]}
+    encoder = policy.observation_encoder
+    assert id(encoder.vision_token_proj.weight) not in vision_group
+    assert id(encoder.vision_step_embedding) not in vision_group
+    assert id(encoder.vision_camera_embedding) not in vision_group
