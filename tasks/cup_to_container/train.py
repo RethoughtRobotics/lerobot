@@ -46,6 +46,7 @@ from lerobot.utils.collate import lerobot_collate_fn
 from lerobot.utils.random_utils import set_seed
 
 from compute_stats import compute_stats
+from plan_metrics import plan_stats, sample_plans
 from wrapped_dataset import CupToContainerDataset, HELD_OUT_EPISODES, TRAIN_EPISODES
 
 # The Multi-Task DiT's denoiser layers LoRA adapts: each transformer block's attention projections and
@@ -285,18 +286,23 @@ def save_ckpt(policy, optimizer, scheduler, step: int, output_dir: Path, stats: 
 
 
 @torch.no_grad()
-def evaluate(model, policy, dataloader, preprocessor, device, use_autocast: bool) -> dict:
-    """Mean loss (and loss components) over the held-out episodes, in eval mode.
+def evaluate(model, policy, dataloader, preprocessor, device, use_autocast: bool, postprocessor=None,
+             plan_samples: int = 0, plan_stride: int = 1) -> dict:
+    """Mean loss (and loss components) over the held-out episodes, in eval mode, and with `plan_samples`, the
+    position error and spread of plans sampled on every `plan_stride`-th frame.
 
     The RNG is reseeded so that stochastic losses (flow/diffusion noise, timesteps) draw the same
     samples every time, which keeps the curve comparable across steps.
     """
     policy.eval()
     totals: dict[str, float] = {}
-    n = 0
+    plan_totals: dict[str, float] = {}
+    n = n_plans = 0
+    start = policy.config.n_obs_steps - 1
     with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
         torch.manual_seed(0)
-        for batch in dataloader:
+        for i, batch in enumerate(dataloader):
+            demonstrated = batch["action"][::plan_stride, start : start + policy.config.n_action_steps]
             for k in list(batch.keys()):
                 if "image" in k and batch[k].dtype == torch.uint8:
                     batch[k] = batch[k].to(device, non_blocking=True).to(torch.float32) / 255.0
@@ -310,8 +316,18 @@ def evaluate(model, policy, dataloader, preprocessor, device, use_autocast: bool
                     if isinstance(v, (int, float)):
                         totals[k] = totals.get(k, 0.0) + v * bs
             n += bs
+            if plan_samples:
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_autocast):
+                    plans = sample_plans(policy, batch, plan_samples, plan_stride, postprocessor, device, seed=i)
+                for k, v in plan_stats(plans, demonstrated).items():
+                    plan_totals[k] = plan_totals.get(k, 0.0) + v * len(plans)
+                n_plans += len(plans)
     policy.train()
-    return {k: v / max(n, 1) for k, v in totals.items()}
+    metrics = {k: v / max(n, 1) for k, v in totals.items()}
+    metrics.update({k: v / max(n_plans, 1) for k, v in plan_totals.items()})
+    if n_plans:
+        metrics["plan_error_over_spread"] = metrics["plan_error_mm"] / max(metrics["plan_spread_mm"], 1e-6)
+    return metrics
 
 
 def train(args):
@@ -347,8 +363,10 @@ def train(args):
     tensor_stats = _json_stats_to_tensors(stats_json, device)
 
     # ── dataset ───────────────────────────────────────────────────────────────
+    # Data-scaling runs train on the first N training episodes; validation stays on HELD_OUT_EPISODES.
+    train_episodes = TRAIN_EPISODES[:args.train_episodes] if args.train_episodes else TRAIN_EPISODES
     logger.info(f"Loading {args.dataset_repo_id} (root={dataset_dir}) "
-                f"(training episodes: {TRAIN_EPISODES[:5]}...)")
+                f"({len(train_episodes)} training episodes: {train_episodes[:5]}...)")
     delta_timestamps = {"action": [k / FPS for k in action_offsets]}
     if policy_cfg.n_obs_steps > 1:
         # Observation history (e.g. DiT: frames t-1 and t) for the state and every kept camera.
@@ -360,7 +378,7 @@ def train(args):
         repo_id=args.dataset_repo_id,
         root=dataset_dir,
         delta_timestamps=delta_timestamps,
-        episodes=TRAIN_EPISODES,
+        episodes=train_episodes,
         video_backend=args.video_backend,
         # Ship uint8 frames from DataLoader workers (4x less IPC than float32); converted on GPU below.
         return_uint8=True,
@@ -415,7 +433,7 @@ def train(args):
     logger.info(f"Params: {n_learn:,} learnable / {n_total:,} total")
 
     # ── preprocessor (normalization + device transfer) ────────────────────────
-    preprocessor, _ = make_pre_post_processors(
+    preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=policy_cfg,
         dataset_stats=tensor_stats,
     )
@@ -434,7 +452,7 @@ def train(args):
     sampler = EpisodeAwareSampler(
         ep_meta["dataset_from_index"],
         ep_meta["dataset_to_index"],
-        episode_indices_to_use=TRAIN_EPISODES,
+        episode_indices_to_use=train_episodes,
         drop_n_last_frames=getattr(policy_cfg, "drop_n_last_frames", 0),
         shuffle=True,
         seed=42,
@@ -511,7 +529,7 @@ def train(args):
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity or None,
-            name=Path(args.output_dir).name,
+            name=args.wandb_name or Path(args.output_dir).name,
             config=vars(args),
         )
 
@@ -582,10 +600,13 @@ def train(args):
             if ema is not None:
                 ema.store(policy.parameters())
                 ema.copy_to(policy.parameters())
-            val_metrics = evaluate(model, policy, val_dataloader, preprocessor, device, use_autocast)
+            plan_samples = args.val_plan_samples if args.policy_type == "multi_task_dit" else 0
+            val_metrics = evaluate(model, policy, val_dataloader, preprocessor, device, use_autocast, postprocessor,
+                                   plan_samples, args.val_plan_stride)
             if ema is not None:
                 ema.restore(policy.parameters())
-            logger.info(f"step {step:6d}/{args.steps}  val_loss={val_metrics['loss']:.4f}")
+            plan_note = f"  plan_error={val_metrics['plan_error_mm']:.1f} mm" if "plan_error_mm" in val_metrics else ""
+            logger.info(f"step {step:6d}/{args.steps}  val_loss={val_metrics['loss']:.4f}{plan_note}")
             if use_wandb:
                 wandb.log({f"val/{k}": v for k, v in val_metrics.items()}, step=step)
             if corr_val_dataloader is not None:
@@ -645,10 +666,15 @@ def parse_args():
     p.add_argument("--log_freq", type=int, default=200)
     p.add_argument("--val_freq", type=int, default=2000,
                    help="Log loss on the held-out episodes every N steps (0 disables)")
+    p.add_argument("--val_plan_samples", type=int, default=6,
+                   help="Multi-Task DiT: plans sampled per held-out frame to log error in mm (0 disables)")
+    p.add_argument("--val_plan_stride", type=int, default=5, help="Sample plans on every Nth held-out frame")
     p.add_argument("--num_workers", type=int, default=8)
     p.add_argument("--hub_repo_id", type=str, default=None)
     p.add_argument("--wandb_project", type=str, default=None)
     p.add_argument("--wandb_entity", type=str, default=None)
+    p.add_argument("--wandb_name", type=str, default=None, help="W&B run name (default: the output directory)")
+    p.add_argument("--train_episodes", type=int, default=None, help="Train on the first N training episodes")
     p.add_argument("--init_from", default=None,
                    help="A trained checkpoint (pretrained_model dir) to fine-tune: its config and stats are kept")
     p.add_argument("--lora_rank", type=int, default=0,
