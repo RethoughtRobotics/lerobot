@@ -347,8 +347,10 @@ def train(args):
     tensor_stats = _json_stats_to_tensors(stats_json, device)
 
     # ── dataset ───────────────────────────────────────────────────────────────
+    # Data-scaling runs train on the first N training episodes; validation stays on HELD_OUT_EPISODES.
+    train_episodes = TRAIN_EPISODES[:args.train_episodes] if args.train_episodes else TRAIN_EPISODES
     logger.info(f"Loading {args.dataset_repo_id} (root={dataset_dir}) "
-                f"(training episodes: {TRAIN_EPISODES[:5]}...)")
+                f"({len(train_episodes)} training episodes: {train_episodes[:5]}...)")
     delta_timestamps = {"action": [k / FPS for k in action_offsets]}
     if policy_cfg.n_obs_steps > 1:
         # Observation history (e.g. DiT: frames t-1 and t) for the state and every kept camera.
@@ -360,7 +362,7 @@ def train(args):
         repo_id=args.dataset_repo_id,
         root=dataset_dir,
         delta_timestamps=delta_timestamps,
-        episodes=TRAIN_EPISODES,
+        episodes=train_episodes,
         video_backend=args.video_backend,
         # Ship uint8 frames from DataLoader workers (4x less IPC than float32); converted on GPU below.
         return_uint8=True,
@@ -434,7 +436,7 @@ def train(args):
     sampler = EpisodeAwareSampler(
         ep_meta["dataset_from_index"],
         ep_meta["dataset_to_index"],
-        episode_indices_to_use=TRAIN_EPISODES,
+        episode_indices_to_use=train_episodes,
         drop_n_last_frames=getattr(policy_cfg, "drop_n_last_frames", 0),
         shuffle=True,
         seed=42,
@@ -511,7 +513,7 @@ def train(args):
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity or None,
-            name=Path(args.output_dir).name,
+            name=args.wandb_name or Path(args.output_dir).name,
             config=vars(args),
         )
 
@@ -649,6 +651,8 @@ def parse_args():
     p.add_argument("--hub_repo_id", type=str, default=None)
     p.add_argument("--wandb_project", type=str, default=None)
     p.add_argument("--wandb_entity", type=str, default=None)
+    p.add_argument("--wandb_name", type=str, default=None, help="W&B run name (default: the output directory)")
+    p.add_argument("--train_episodes", type=int, default=None, help="Train on the first N training episodes")
     p.add_argument("--init_from", default=None,
                    help="A trained checkpoint (pretrained_model dir) to fine-tune: its config and stats are kept")
     p.add_argument("--lora_rank", type=int, default=0,
