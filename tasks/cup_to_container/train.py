@@ -331,7 +331,7 @@ def evaluate(model, policy, dataloader, preprocessor, device, use_autocast: bool
 
 
 def train(args):
-    set_seed(42)
+    set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -455,7 +455,7 @@ def train(args):
         episode_indices_to_use=train_episodes,
         drop_n_last_frames=getattr(policy_cfg, "drop_n_last_frames", 0),
         shuffle=True,
-        seed=42,
+        seed=args.seed,
         # Episode-filtered datasets are indexed relatively (0..len-1), not by absolute frame index.
         absolute_to_relative_idx=base_train.absolute_to_relative_idx,
     )
@@ -662,6 +662,7 @@ def parse_args():
     p.add_argument("--output_dir", required=True)
     p.add_argument("--steps", type=int, default=100_000)
     p.add_argument("--batch_size", type=int, default=8)
+    p.add_argument("--seed", type=int, default=42, help="Seeds initialization, noise draws and episode order")
     p.add_argument("--save_freq", type=int, default=10_000)
     p.add_argument("--log_freq", type=int, default=200)
     p.add_argument("--val_freq", type=int, default=2000,
