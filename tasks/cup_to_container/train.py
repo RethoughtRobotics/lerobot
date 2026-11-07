@@ -352,6 +352,11 @@ def train(args):
     else:
         chunk_size = args.chunk_size or DEFAULT_CHUNK_SIZE[args.policy_type]
         policy_cfg = build_policy_config(args.policy_type, chunk_size)
+        if args.vision_cross_attention:
+            if args.policy_type != "multi_task_dit":
+                raise SystemExit("--vision_cross_attention: Multi-Task DiT only")
+            policy_cfg.vision_cross_attention = True
+            policy_cfg.vision_token_layer = args.vision_token_layer
         action_offsets = list(policy_cfg.action_delta_indices)
         # TCP-relative action stats depend on the horizon (later steps drift further from the
         # current pose) and on where the window starts, so the cache is keyed by both.
@@ -676,6 +681,10 @@ def parse_args():
     p.add_argument("--wandb_entity", type=str, default=None)
     p.add_argument("--wandb_name", type=str, default=None, help="W&B run name (default: the output directory)")
     p.add_argument("--train_episodes", type=int, default=None, help="Train on the first N training episodes")
+    p.add_argument("--vision_cross_attention", action="store_true",
+                   help="Multi-Task DiT: cross-attend from the actions to every CLIP token")
+    p.add_argument("--vision_token_layer", type=int, default=-1,
+                   help="CLIP hidden layer of those tokens: -1 last, -2 penultimate")
     p.add_argument("--init_from", default=None,
                    help="A trained checkpoint (pretrained_model dir) to fine-tune: its config and stats are kept")
     p.add_argument("--lora_rank", type=int, default=0,
