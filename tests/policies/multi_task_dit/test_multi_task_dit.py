@@ -37,7 +37,7 @@ pytestmark = pytest.mark.skipif(
 
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.policies.multi_task_dit.configuration_multi_task_dit import MultiTaskDiTConfig
-from lerobot.policies.multi_task_dit.modeling_multi_task_dit import MultiTaskDiTPolicy
+from lerobot.policies.multi_task_dit.modeling_multi_task_dit import CLIPVisionEncoder, MultiTaskDiTPolicy
 from lerobot.policies.multi_task_dit.processor_multi_task_dit import (
     make_multi_task_dit_pre_post_processors,
 )
@@ -619,3 +619,24 @@ def test_multi_task_dit_policy_get_optim_params():
     assert "lr" in param_groups[1]
     expected_lr = config.optimizer_lr * config.vision_encoder_lr_multiplier
     assert param_groups[1]["lr"] == expected_lr
+
+
+def test_clip_vision_encoder_tokens():
+    """Asking for tokens leaves the CLS output unchanged and returns CLS plus 196 patches per image."""
+    encoder = CLIPVisionEncoder("openai/clip-vit-base-patch16").eval()
+    images = torch.rand(2, 3, 224, 224)
+    with torch.no_grad():
+        cls_only, no_tokens = encoder(images)
+        cls, last = encoder(images, -1)
+        _, penultimate = encoder(images, -2)
+
+    assert no_tokens is None
+    assert torch.equal(cls, cls_only)
+    assert last.shape == (2, 197, encoder.embed_dim)
+    assert torch.equal(last[:, 0], cls[..., 0, 0])
+    assert not torch.equal(last, penultimate)
+
+
+def test_vision_token_layer_counts_from_the_end():
+    with pytest.raises(ValueError, match="vision_token_layer"):
+        MultiTaskDiTConfig(vision_token_layer=0)

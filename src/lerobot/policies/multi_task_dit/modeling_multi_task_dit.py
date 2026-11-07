@@ -211,7 +211,7 @@ class MultiTaskDiTPolicy(PreTrainedPolicy):
 
 
 class CLIPVisionEncoder(nn.Module):
-    """CLIP vision encoder using the CLS token for global image representation."""
+    """CLIP vision encoder: the CLS token for global image representation, and optionally all tokens."""
 
     def __init__(self, model_name: str):
         super().__init__()
@@ -220,12 +220,13 @@ class CLIPVisionEncoder(nn.Module):
         self.num_non_spatial_tokens = 1
         self.embed_dim = self.model.config.hidden_size
 
-    def forward(self, x: Tensor) -> Tensor:
-        """Encode RGB image to CLS token."""
-        outputs = self.model(pixel_values=x, output_hidden_states=False)
+    def forward(self, x: Tensor, token_layer: int | None = None) -> tuple[Tensor, Tensor | None]:
+        """Encode RGB image to its CLS token and, with `token_layer`, that hidden layer's tokens (b, t, d)."""
+        outputs = self.model(pixel_values=x, output_hidden_states=token_layer is not None)
         cls_token = outputs.last_hidden_state[:, 0]
         b, embed_dim = cls_token.shape
-        return cls_token.reshape(b, embed_dim, 1, 1)
+        tokens = None if token_layer is None else outputs.hidden_states[token_layer]
+        return cls_token.reshape(b, embed_dim, 1, 1), tokens
 
     def get_output_shape(self) -> tuple:
         return (self.embed_dim, 1, 1)
@@ -362,6 +363,7 @@ class ObservationEncoder(nn.Module):
         """Encode observations to vector format."""
         batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
         conditioning_feats = []
+        token_layer = self.config.vision_token_layer if self.config.vision_cross_attention else None
 
         conditioning_feats.append(batch[OBS_STATE])
 
@@ -379,7 +381,7 @@ class ObservationEncoder(nn.Module):
                     cam_images = images[:, :, cam_idx]
                     cam_images_flat = einops.rearrange(cam_images, "b s c h w -> (b s) c h w")
                     cam_images_flat = self._apply_preprocessing(cam_images_flat)
-                    cam_features = self.vision_encoders[cam_idx](cam_images_flat)
+                    cam_features, _ = self.vision_encoders[cam_idx](cam_images_flat, token_layer)
                     cam_visual_features = cam_features.flatten(start_dim=1)
                     cam_features_reshaped = einops.rearrange(
                         cam_visual_features, "(b s) f -> b s f", b=batch_size, s=n_obs_steps
@@ -390,7 +392,8 @@ class ObservationEncoder(nn.Module):
             else:
                 images_flat = einops.rearrange(images, "b s n c h w -> (b s n) c h w")
                 images_flat = self._apply_preprocessing(images_flat)
-                visual_features = self.vision_encoder(images_flat).flatten(start_dim=1)
+                visual_features, _ = self.vision_encoder(images_flat, token_layer)
+                visual_features = visual_features.flatten(start_dim=1)
                 img_features = einops.rearrange(
                     visual_features, "(b s n) f -> b s (n f)", b=batch_size, s=n_obs_steps, n=self.num_cameras
                 )

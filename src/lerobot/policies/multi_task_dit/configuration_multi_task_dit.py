@@ -79,6 +79,12 @@ class MultiTaskDiTConfig(PreTrainedConfig):
     # Per sample, the same keep/drop choice is applied across observation steps, and at least one
     # camera is always kept.
     camera_dropout: dict[str, float] = field(default_factory=dict)
+    # Cross-attend from the action tokens to every CLIP token (CLS and patches) of every camera and
+    # observation step. The conditioning vector, CLS included, is kept alongside this.
+    vision_cross_attention: bool = False
+    # CLIP hidden layer the tokens come from: -1 last, -2 penultimate. CLIP's training loss acts only on
+    # the final CLS output, so LLaVA reads its patch features from -2 (Liu et al., 2023).
+    vision_token_layer: int = -1
 
     # Text Encoder (CLIP)
     text_encoder_name: str = "openai/clip-vit-base-patch16"  # HuggingFace CLIP model
@@ -131,6 +137,8 @@ class MultiTaskDiTConfig(PreTrainedConfig):
             raise ValueError("num_heads must be positive")
         if self.hidden_dim % self.num_heads != 0:
             raise ValueError("hidden_dim must be divisible by num_heads")
+        if self.vision_token_layer >= 0:
+            raise ValueError("vision_token_layer counts from the last layer, so it must be negative")
         if not (0.0 <= self.dropout <= 1.0):
             raise ValueError("dropout must be between 0.0 and 1.0")
 
