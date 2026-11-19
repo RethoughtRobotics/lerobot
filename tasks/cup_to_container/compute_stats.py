@@ -1,7 +1,7 @@
 """
 Compute normalization stats (mean/std) for the transformed CupToContainer data.
 
-Stats are computed only over the training split (episodes not in HELD_OUT_EPISODES).
+Stats are computed only over the training split (the episodes not held out for validation).
 Outputs a stats.json file compatible with lerobot's LeRobotDatasetMetadata.
 
 Usage:
@@ -21,7 +21,7 @@ from tqdm import tqdm
 from lerobot.datasets import LeRobotDataset
 
 from transforms import state_to_17d_np, tcp_relative_np
-from wrapped_dataset import HELD_OUT_EPISODES, TRAIN_EPISODES
+from wrapped_dataset import split_episodes
 
 
 def _to_jsonable(obj):
@@ -38,7 +38,7 @@ def _to_jsonable(obj):
 
 def compute_stats(repo_id: str, dataset_dir: Path | None, output_path: Path,
                   video_backend: str = "torchcodec", chunk_size: int = 100,
-                  action_start: int = 0) -> dict:
+                  action_start: int = 0, episodes=None) -> dict:
     """Stats over the training split, read from the parquet columns only.
 
     Like ABC's states_actions.bin reader, this never decodes video: each frame's action
@@ -53,10 +53,11 @@ def compute_stats(repo_id: str, dataset_dir: Path | None, output_path: Path,
     dataset = LeRobotDataset(
         repo_id=repo_id,
         root=dataset_dir,
-        episodes=TRAIN_EPISODES,
+        episodes=episodes,  # None: every episode
         video_backend=video_backend,
     )
-    print(f"Training episodes: {len(TRAIN_EPISODES)} / {dataset.meta.total_episodes} total")
+    print(f"Training episodes: {len(episodes) if episodes is not None else dataset.meta.total_episodes} / "
+          f"{dataset.meta.total_episodes} total")
     print(f"Training frames: {len(dataset)}")
 
     cols = dataset.hf_dataset.with_format("numpy")
@@ -145,5 +146,10 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_repo_id", required=True)
     parser.add_argument("--dataset_dir", type=Path, default=None)
     parser.add_argument("--output_path", type=Path, required=True)
+    parser.add_argument("--val_episodes", type=int, nargs="*", default=[], help="Episodes left out of the stats")
     args = parser.parse_args()
-    compute_stats(args.dataset_repo_id, args.dataset_dir, args.output_path)
+    from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+
+    total = LeRobotDatasetMetadata(args.dataset_repo_id, root=args.dataset_dir).total_episodes
+    compute_stats(args.dataset_repo_id, args.dataset_dir, args.output_path,
+                  episodes=split_episodes(total, args.val_episodes)[0])
