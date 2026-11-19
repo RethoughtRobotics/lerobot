@@ -208,6 +208,25 @@ class MixedSampler(torch.utils.data.Sampler):
             yield self.indices[i]
 
 
+def frames_before_interventions(intervention, episode, n_before: int) -> np.ndarray:
+    """Mask of the policy's own frames in the `n_before` frames before each intervention starts, per episode.
+
+    These are the moments the operator judged wrong enough to take over, so in a correction rollout they are
+    the mistakes being corrected (Sirius, Liu et al. 2023, and RaC, Hu et al. 2025, leave them out of the
+    imitation loss). Intervention frames themselves are never masked.
+    """
+    held = np.asarray(intervention, dtype=float).reshape(-1) > 0.5
+    episode = np.asarray(episode).reshape(-1)
+    mask = np.zeros(len(held), dtype=bool)
+    starts = [i for i in range(len(held)) if held[i] and (i == 0 or not held[i - 1] or episode[i - 1] != episode[i])]
+    for s in starts:
+        j = s - 1
+        while j >= 0 and j >= s - n_before and episode[j] == episode[s] and not held[j]:
+            mask[j] = True
+            j -= 1
+    return mask
+
+
 def load_or_compute_stats(stats_path: Path, repo_id: str, dataset_dir: Path | None, video_backend: str,
                           chunk_size: int, action_start: int = 0, episodes=None) -> dict:
     if stats_path.exists():
@@ -487,7 +506,16 @@ def train(args):
             drop_n_last_frames=getattr(policy_cfg, "drop_n_last_frames", 0),
             absolute_to_relative_idx=corr_base.absolute_to_relative_idx,
         )
-        sampler = MixedSampler(sampler.indices, [len(train_dataset) + i for i in corr_sampler.indices],
+        corr_indices = list(corr_sampler.indices)
+        if args.corrections_skip_before > 0:
+            columns = corr_base.hf_dataset.with_format("numpy")
+            n_before = round(args.corrections_skip_before * corr_base.meta.fps)
+            skip = frames_before_interventions(columns["intervention"], columns["episode_index"], n_before)
+            corr_indices = [i for i in corr_indices if not skip[i]]
+            logger.info(f"Correction frames sampled: {len(corr_indices)} of {len(corr_sampler.indices)}, leaving "
+                        f"out the policy's {int(skip.sum())} frames in the {args.corrections_skip_before} s before "
+                        f"each intervention ({int(np.asarray(columns['intervention']).sum())} intervention frames)")
+        sampler = MixedSampler(sampler.indices, [len(train_dataset) + i for i in corr_indices],
                                args.corrections_weight)
     collate_fn = lerobot_collate_fn if train_dataset.meta.has_language_columns else None
     dataloader = torch.utils.data.DataLoader(
@@ -744,6 +772,9 @@ def parse_args():
     p.add_argument("--corrections_repo_id", default=None,
                    help="Correction episodes recorded on the robot, trained beside the dataset")
     p.add_argument("--corrections_dir", default=None, help="Local root of the corrections dataset")
+    p.add_argument("--corrections_skip_before", type=float, default=0.0,
+                   help="Seconds of the policy's own frames before each intervention left out of training (needs an "
+                        "'intervention' column; 0: off)")
     p.add_argument("--corrections_weight", type=int, default=1,
                    help="How many times each correction frame is sampled per pass over the demonstrations")
     p.add_argument("--corrections_val_episodes", type=int, nargs="*", default=[],
