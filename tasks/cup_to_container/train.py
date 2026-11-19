@@ -458,6 +458,12 @@ def train(args):
         optimizer = torch.optim.AdamW([p for p in policy.parameters() if p.requires_grad], lr=args.lr, weight_decay=0.0)
         scheduler = CosineAnnealingLR(optimizer, T_max=args.steps, eta_min=args.lr * 0.1)
     else:
+        if args.warmup_steps is not None:
+            # Warm starts: the checkpoint's schedule ended near zero, so ramp back up instead of jumping.
+            if not hasattr(policy.config, "scheduler_warmup_steps"):
+                raise SystemExit(f"--warmup_steps: {args.policy_type} has no scheduler_warmup_steps")
+            policy.config.scheduler_warmup_steps = args.warmup_steps
+            logger.info(f"Learning-rate warmup: {args.warmup_steps} steps")
         optimizer, scheduler = build_optimizer(args.policy_type, policy, args.steps)
 
     # ── sampler & dataloader ──────────────────────────────────────────────────
@@ -530,6 +536,22 @@ def train(args):
             pin_memory=device.type == "cuda", drop_last=False, collate_fn=collate_fn,
         )
 
+    # Fixed samples of the training frames, one per data source, scored like validation (no gradient, the
+    # RNG restored), so a warm start shows whether it learns the new data while keeping the old.
+    probe_loaders = {}
+    if args.probe_frames > 0 and args.val_freq > 0:
+        rng = np.random.default_rng(0)
+        sources = {"base": train_dataset}
+        if corrections is not None:
+            sources["extra"] = corr_frames
+        for name, ds in sources.items():
+            picked = sorted(rng.choice(len(ds), size=min(args.probe_frames, len(ds)), replace=False).tolist())
+            probe_loaders[name] = torch.utils.data.DataLoader(
+                torch.utils.data.Subset(ds, picked), batch_size=args.batch_size, shuffle=False,
+                num_workers=min(2, args.num_workers), drop_last=False, collate_fn=collate_fn,
+            )
+        logger.info(f"Probe frames per source: {({k: len(v.dataset) for k, v in probe_loaders.items()})}")
+
     # ── WandB ─────────────────────────────────────────────────────────────────
     use_wandb = bool(args.wandb_project)
     # `model` runs the forward pass; `policy` stays uncompiled for save_pretrained / push_to_hub.
@@ -546,6 +568,8 @@ def train(args):
             entity=args.wandb_entity or None,
             name=args.wandb_name or Path(args.output_dir).name,
             config=vars(args),
+            group=args.wandb_group,
+            tags=args.wandb_tags or None,
         )
 
     ema = None
@@ -630,6 +654,18 @@ def train(args):
                 if use_wandb:
                     wandb.log({f"val_corrections/{k}": v for k, v in corr_metrics.items()}, step=step)
 
+        if probe_loaders and (step % args.val_freq == 0 or step == args.steps):
+            if ema is not None:
+                ema.store(policy.parameters())
+                ema.copy_to(policy.parameters())
+            probe = {name: evaluate(model, policy, loader, preprocessor, device, use_autocast)["loss"]
+                     for name, loader in probe_loaders.items()}
+            if ema is not None:
+                ema.restore(policy.parameters())
+            logger.info(f"step {step:6d}/{args.steps}  " + "  ".join(f"probe_{k}_loss={v:.4f}" for k, v in probe.items()))
+            if use_wandb:
+                wandb.log({f"probe/{k}_loss": v for k, v in probe.items()}, step=step)
+
         if step % args.save_freq == 0 or step == args.steps:
             if ema is not None:
                 ema.store(policy.parameters())
@@ -689,6 +725,12 @@ def parse_args():
     p.add_argument("--wandb_project", type=str, default=None)
     p.add_argument("--wandb_entity", type=str, default=None)
     p.add_argument("--wandb_name", type=str, default=None, help="W&B run name (default: the output directory)")
+    p.add_argument("--warmup_steps", type=int, default=None,
+                   help="Learning-rate warmup steps (default: the policy config's, the checkpoint's with --init_from)")
+    p.add_argument("--wandb_group", type=str, default=None, help="W&B group, to show related runs together")
+    p.add_argument("--wandb_tags", type=str, nargs="*", default=None, help="W&B tags")
+    p.add_argument("--probe_frames", type=int, default=0,
+                   help="Training frames per data source scored every --val_freq steps (0: off)")
     p.add_argument("--val_episodes", type=int, nargs="*", default=[],
                    help="Episodes held out for validation loss (default: none, every episode trains)")
     p.add_argument("--train_episodes", type=int, default=None,
