@@ -18,7 +18,6 @@ import numpy as np
 from lerobot.datasets import LeRobotDataset
 
 from transforms import apply_actions_np, tcp_relative_np
-from wrapped_dataset import TRAIN_EPISODES
 
 
 def validate(dataset_dir: Path, n_frames: int = 20) -> None:
@@ -26,7 +25,6 @@ def validate(dataset_dir: Path, n_frames: int = 20) -> None:
         repo_id="andnetdeboer/CupToContainer",
         root=dataset_dir,
         delta_timestamps={"action": [k / 25.0 for k in range(100)]},
-        episodes=TRAIN_EPISODES,
         video_backend="pyav",
     )
 

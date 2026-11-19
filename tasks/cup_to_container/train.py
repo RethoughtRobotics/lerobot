@@ -4,7 +4,7 @@ Training script for CupToContainer — ACT and SmolVLA.
 Implements the spec in the CupToContainer training spec document:
   - Custom TCP-relative action transform  (absolute 8-D → relative 7-D)
   - 17-D state encoding  (quaternion → 6-D rotation)
-  - Episode-based train/val split (hold out episodes 4,14,24,34,44)
+  - Episode split from the dataset itself: every episode trains except those passed as --val_episodes
   - Normalization stats computed from training split only
 
 Fine-tuning a trained policy on corrections (--init_from, --lora_rank, --corrections_repo_id): the
@@ -21,6 +21,7 @@ Usage (via shell wrappers train_act_cup.sh / train_smolvla_cup.sh):
         --steps 100000 --batch_size 8 --save_freq 10000
 """
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -47,7 +48,7 @@ from lerobot.utils.random_utils import set_seed
 
 from compute_stats import compute_stats
 from plan_metrics import plan_stats, sample_plans
-from wrapped_dataset import CupToContainerDataset, HELD_OUT_EPISODES, TRAIN_EPISODES
+from wrapped_dataset import CupToContainerDataset, split_episodes
 
 # The Multi-Task DiT's denoiser layers LoRA adapts: each transformer block's attention projections and
 # MLP (RethoughtAI inference.lora.DIT_TARGETS), as a PEFT target regex over the policy's module names.
@@ -208,13 +209,13 @@ class MixedSampler(torch.utils.data.Sampler):
 
 
 def load_or_compute_stats(stats_path: Path, repo_id: str, dataset_dir: Path | None, video_backend: str,
-                          chunk_size: int, action_start: int = 0) -> dict:
+                          chunk_size: int, action_start: int = 0, episodes=None) -> dict:
     if stats_path.exists():
         logger.info(f"Loading cached stats from {stats_path}")
         with open(stats_path) as f:
             return json.load(f)
     logger.info("No cached stats found — computing from training split (this takes a few minutes)...")
-    return compute_stats(repo_id, dataset_dir, stats_path, video_backend, chunk_size, action_start)
+    return compute_stats(repo_id, dataset_dir, stats_path, video_backend, chunk_size, action_start, episodes)
 
 
 def build_optimizer(policy_type: str, policy: torch.nn.Module, steps: int):
@@ -336,8 +337,17 @@ def train(args):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── stats ─────────────────────────────────────────────────────────────────
+    # ── episode split ─────────────────────────────────────────────────────────
     dataset_dir = Path(args.dataset_dir) if args.dataset_dir else None
+    total_episodes = LeRobotDatasetMetadata(args.dataset_repo_id, root=dataset_dir).total_episodes
+    try:
+        train_episodes, val_episodes = split_episodes(total_episodes, args.val_episodes, args.train_episodes)
+    except ValueError as e:
+        raise SystemExit(f"{args.dataset_repo_id}: {e}") from None
+    logger.info(f"{args.dataset_repo_id}: {total_episodes} episodes, {len(train_episodes)} train, "
+                f"validation {val_episodes or 'none'}")
+
+    # ── stats ─────────────────────────────────────────────────────────────────
     if args.init_from:
         # The checkpoint's own config and stats: new stats would shift what its inputs mean.
         from lerobot.configs.policies import PreTrainedConfig
@@ -356,15 +366,16 @@ def train(args):
         # TCP-relative action stats depend on the horizon (later steps drift further from the
         # current pose) and on where the window starts, so the cache is keyed by both.
         start_tag = f"_start{action_offsets[0]}" if action_offsets[0] != 0 else ""
+        # The cache is keyed by the training episodes too: stats from another split must not be reused.
+        split_tag = hashlib.sha1(",".join(map(str, train_episodes)).encode()).hexdigest()[:8]
         stats_path = (Path(__file__).parent /
-                      f"stats_{args.dataset_repo_id.split('/')[-1]}_chunk{chunk_size}{start_tag}.json")
+                      f"stats_{args.dataset_repo_id.split('/')[-1]}_chunk{chunk_size}{start_tag}"
+                      f"_ep{len(train_episodes)}-{split_tag}.json")
         stats_json = load_or_compute_stats(stats_path, args.dataset_repo_id, dataset_dir, args.video_backend,
-                                           chunk_size, action_offsets[0])
+                                           chunk_size, action_offsets[0], train_episodes)
     tensor_stats = _json_stats_to_tensors(stats_json, device)
 
     # ── dataset ───────────────────────────────────────────────────────────────
-    # Data-scaling runs train on the first N training episodes; validation stays on HELD_OUT_EPISODES.
-    train_episodes = TRAIN_EPISODES[:args.train_episodes] if args.train_episodes else TRAIN_EPISODES
     logger.info(f"Loading {args.dataset_repo_id} (root={dataset_dir}) "
                 f"({len(train_episodes)} training episodes: {train_episodes[:5]}...)")
     delta_timestamps = {"action": [k / FPS for k in action_offsets]}
@@ -390,9 +401,11 @@ def train(args):
     corrections = None
     if args.corrections_repo_id:
         corr_meta = LeRobotDatasetMetadata(args.corrections_repo_id, root=args.corrections_dir)
-        corr_val_episodes = (args.corrections_val_episodes if args.corrections_val_episodes is not None
-                             else [corr_meta.total_episodes - 1])
-        corr_train_episodes = [e for e in range(corr_meta.total_episodes) if e not in corr_val_episodes]
+        try:
+            corr_train_episodes, corr_val_episodes = split_episodes(corr_meta.total_episodes,
+                                                                    args.corrections_val_episodes)
+        except ValueError as e:
+            raise SystemExit(f"{args.corrections_repo_id}: {e}") from None
         image_shapes = {k: tuple(train_dataset.meta.features[k]["shape"][:2]) for k in train_dataset.meta.camera_keys}
         # From the metadata: decoding a frame here would leave video decoders in this process that the
         # forked DataLoader workers inherit and corrupt each other through.
@@ -484,17 +497,19 @@ def train(args):
     )
 
     val_dataloader = None
-    if args.val_freq > 0:
+    if args.val_freq > 0 and not val_episodes:
+        logger.info("No validation episodes (--val_episodes): training on every episode, no validation loss")
+    if args.val_freq > 0 and val_episodes:
         base_val = LeRobotDataset(
             repo_id=args.dataset_repo_id,
             root=dataset_dir,
             delta_timestamps=delta_timestamps,
-            episodes=HELD_OUT_EPISODES,
+            episodes=val_episodes,
             video_backend=args.video_backend,
             return_uint8=True,
         )
         val_dataset = CupToContainerDataset(base_val, stats_json, cameras=args.cameras)
-        logger.info(f"Validation frames: {len(val_dataset)} (episodes {HELD_OUT_EPISODES})")
+        logger.info(f"Validation frames: {len(val_dataset)} (episodes {val_episodes})")
         val_workers = min(4, args.num_workers)
         val_dataloader = torch.utils.data.DataLoader(
             val_dataset,
@@ -674,7 +689,10 @@ def parse_args():
     p.add_argument("--wandb_project", type=str, default=None)
     p.add_argument("--wandb_entity", type=str, default=None)
     p.add_argument("--wandb_name", type=str, default=None, help="W&B run name (default: the output directory)")
-    p.add_argument("--train_episodes", type=int, default=None, help="Train on the first N training episodes")
+    p.add_argument("--val_episodes", type=int, nargs="*", default=[],
+                   help="Episodes held out for validation loss (default: none, every episode trains)")
+    p.add_argument("--train_episodes", type=int, default=None,
+                   help="Train on only the first N non-validation episodes (default: all of them)")
     p.add_argument("--init_from", default=None,
                    help="A trained checkpoint (pretrained_model dir) to fine-tune: its config and stats are kept")
     p.add_argument("--lora_rank", type=int, default=0,
@@ -686,8 +704,8 @@ def parse_args():
     p.add_argument("--corrections_dir", default=None, help="Local root of the corrections dataset")
     p.add_argument("--corrections_weight", type=int, default=1,
                    help="How many times each correction frame is sampled per pass over the demonstrations")
-    p.add_argument("--corrections_val_episodes", type=int, nargs="*", default=None,
-                   help="Correction episodes held out for validation (default: the last one)")
+    p.add_argument("--corrections_val_episodes", type=int, nargs="*", default=[],
+                   help="Correction episodes held out for validation (default: none, every one trains)")
     return p.parse_args()
 
 

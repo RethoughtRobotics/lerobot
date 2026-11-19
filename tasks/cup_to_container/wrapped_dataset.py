@@ -14,9 +14,25 @@ import torch
 
 from transforms import state_history_to_17d_torch, tcp_relative_torch
 
-# Validation split: hold these 5 episodes out of 51 (0-indexed)
-HELD_OUT_EPISODES = [4, 14, 24, 34, 44]
-TRAIN_EPISODES = [i for i in range(51) if i not in HELD_OUT_EPISODES]
+def split_episodes(total_episodes: int, val_episodes=(), first_n=None) -> tuple[list[int], list[int]]:
+    """(training, validation) episode indices of a dataset with `total_episodes` episodes.
+
+    Every episode not in `val_episodes` trains, so the split follows the dataset rather than a fixed count;
+    `first_n` keeps the first N of those (data-scaling runs). An empty `val_episodes` trains on all of them.
+    Raises ValueError for validation episodes the dataset lacks or a split that leaves nothing to train on.
+    """
+    val = sorted(set(int(e) for e in val_episodes))
+    missing = [e for e in val if not 0 <= e < total_episodes]
+    if missing:
+        raise ValueError(f'validation episodes {missing} are not in a dataset of {total_episodes} episodes')
+    train = [e for e in range(total_episodes) if e not in set(val)]
+    if first_n is not None:
+        if first_n > len(train):
+            raise ValueError(f'first {first_n} training episodes requested, only {len(train)} available')
+        train = train[:first_n]
+    if not train:
+        raise ValueError('no training episodes left after the validation split')
+    return train, val
 
 
 class _PatchedMeta:
